@@ -1,4 +1,20 @@
-"""Procedural Blender scene. Args: --frames A-B|a,b,c --res WxH --samples N --engine CYCLES|WORKBENCH --out DIR"""
+"""Technical-cutaway scene: water pressure from a bottle to a building.
+
+Usage (bpy module or blender -b -P):
+    python3 scene.py --frames 1-948 --res 720x1280 --samples 32 --out frames/
+    python3 scene.py --frames 133,397,505 --res 540x960 --samples 64 --out style/
+    python3 scene.py --frames 1-948 --res 270x480 --engine WORKBENCH --out animatic/
+    python3 scene.py --anchors anchors.json          # screen positions for post labels (no render)
+
+Everything is built from primitives + modifiers. Shell cut faces get the orange hatch via boolean
+material transfer; water cross-sections keep their own material. Camera, pump, needles and
+stream growth use keyframes with eased Bezier F-curves. Free water (droplets, splashes,
+dribble wobble) is procedural in a frame-change handler, so it also evaluates at motion-blur
+sub-frames.
+
+Physics (see beat sheet): Torricelli jets v = sqrt(2 g d); tank sits on the roof slab, water
+surface at Z_SURF; gauge pressure ≈ depth below Z_SURF / 10.2 m per bar.
+"""
 import argparse, json, math, os, sys
 import bpy
 from mathutils import Vector
@@ -7,11 +23,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import materials  # noqa: E402
 
 FPS = 24
-T = dict(S1=0.0, S2=3.4, S3=7.4, S4=12.5, S5=17.6, S5B=21.9, S6=24.3, S7=32.6, S8=38.2, END=39.5)
-HOLE_LOW_OPEN, HOLE_HIGH_OPEN, BOTTLE_CUT = 0.0, 4.5, 7.4
-NEEDLE_CUE = {'G3': 20.0, 'G2': 20.4, 'G1': 20.8, 'G0': 21.2}   # on "adds about one bar" (≈20.0–21.6 s), top → ground
-PUMP_DROP, PUMP_LAND, SHOWER_FULL = 33.2, 33.8, 34.2
-BOOST_T = PUMP_LAND + 0.2                     # top-floor needle swings up as the pump starts
+# >>> CUES (generated — numbers only)
+EV = {"HOLE_LOW_OPEN": 5.267, "HOLE_HIGH_OPEN": 8.552, "BOTTLE_CUT": 10.094, "NEEDLES": [19.638, 19.988, 20.338, 20.688], "PUMP_DROP": 30.639, "PUMP_SPIN": 32.288, "PUMP_LAND": 31.239, "BOOST_T": 34.084, "SHOWER_FULL": 35.384}
+SHOTS = [{"name": "C0", "t0": 0.0, "t1": 2.592}, {"name": "B1", "t0": 2.592, "t1": 4.497}, {"name": "B2", "t0": 4.497, "t1": 7.562}, {"name": "B3", "t0": 7.562, "t1": 10.094}, {"name": "B4", "t0": 10.094, "t1": 12.393}, {"name": "B5", "t0": 12.393, "t1": 14.483}, {"name": "M1", "t0": 14.483, "t1": 16.447}, {"name": "M2", "t0": 16.447, "t1": 17.935}, {"name": "G1", "t0": 17.935, "t1": 19.338}, {"name": "G2", "t0": 19.338, "t1": 21.767}, {"name": "G3", "t0": 21.767, "t1": 24.087}, {"name": "T1", "t0": 24.087, "t1": 26.961}, {"name": "T2", "t0": 26.961, "t1": 28.899}, {"name": "T3", "t0": 28.899, "t1": 30.489}, {"name": "P1", "t0": 30.489, "t1": 32.138}, {"name": "P2", "t0": 32.138, "t1": 33.834}, {"name": "P3", "t0": 33.834, "t1": 35.084}, {"name": "P4", "t0": 35.084, "t1": 39.58}]
+END = 39.58
+# <<< CUES
+T = dict(END=END)
+HOLE_LOW_OPEN, HOLE_HIGH_OPEN, BOTTLE_CUT = EV['HOLE_LOW_OPEN'], EV['HOLE_HIGH_OPEN'], EV['BOTTLE_CUT']
+NEEDLE_CUE = dict(zip(('G3', 'G2', 'G1', 'G0'), EV['NEEDLES']))      # top floor → ground floor
+PUMP_DROP, PUMP_LAND, PUMP_SPIN = EV['PUMP_DROP'], EV['PUMP_LAND'], EV['PUMP_SPIN']
+BOOST_T, SHOWER_FULL = EV['BOOST_T'], EV['SHOWER_FULL']
+if '--before' in sys.argv:              # BEFORE half of the end split: same shots, but the pump never boosts
+    BOOST_T = SHOWER_FULL = 1e6
 G = 9.81
 
 ROOF_Z = 12.125
@@ -44,6 +67,7 @@ def parse_args():
     p.add_argument('--out', default='frames')
     p.add_argument('--no-blur', action='store_true')
     p.add_argument('--anchors', default=None)
+    p.add_argument('--before', action='store_true')
     a = p.parse_args(argv)
     if '-' in a.frames and ',' not in a.frames:
         s, e = a.frames.split('-'); a.frame_list = list(range(int(s), int(e) + 1)); a.range = (int(s), int(e))
@@ -333,6 +357,8 @@ def build_building(L):
         for dy in (-0.62, 0.62):
             box(f'StandLeg{dx}{dy}', (TANK_X + dx - 0.05, dy - 0.05, ROOF_Z), (TANK_X + dx + 0.05, dy + 0.05, sb - 0.05), L['pipe'], bevel=0.012)
     box('StandTopX', (TANK_X - 0.72, -0.72, sb - 0.06), (TANK_X + 0.72, 0.72, sb), L['pipe'], bevel=0.015)
+    for i, (dx, dy, dz) in enumerate([(x, y, z) for x in (-TANK_R, TANK_R) for y in (-TANK_R, TANK_R) for z in (sb, sb + TANK_H + 0.25)]):
+        anchor(f'kTank{i}', (TANK_X + dx, dy, dz))
     tank = cyl('Tank', (TANK_X, 0, sb + TANK_H / 2), TANK_R, TANK_H, L['poly'], bevel=0.05, verts=56)
     hollow(tank, cyl('TankHollow', (TANK_X, 0, sb + TANK_H / 2 + 0.04), TANK_R - 0.06, TANK_H, L['poly'], bevel=0, verts=56))
     cut(tank, tq)
@@ -492,11 +518,11 @@ def build_streams(L):
            cling=(o.x - B_R - 0.004, o.y, o.z + 0.002), grow=1.2)
     # ground-floor tap: thick, fast gush that splashes out of the bucket
     z0 = FLOOR_TOPS[0] + 1.15 - 0.06
-    Stream('Gush', (2.74, 0.45, z0), (2.0, 0, -0.15), 0.55, 0.06, W, 0.0, brk=0.55, n_drops=22,
+    Stream('Gush', (2.74, 0.45, z0), (2.0, 0, -0.15), 0.55, 0.06, W, -2.0, brk=0.55, n_drops=22,
            splash_v=1.4, splash_n=16, splash_r=0.55)
     # top-floor shower BEFORE the pump: weak, wobbly dribbles + drips (approved look)
     for i, (dx, dy) in enumerate([(-0.06, 0.0), (0.03, 0.05), (0.05, -0.04), (-0.02, -0.06)]):
-        Stream(f'Weak{i}', (3.5 + dx, 0.45 + dy, 11.26), (0.02 * dx, 0.02 * dy, -0.05), FLOOR_TOPS[3], 0.017, W, 0.0,
+        Stream(f'Weak{i}', (3.5 + dx, 0.45 + dy, 11.26), (0.02 * dx, 0.02 * dy, -0.05), FLOOR_TOPS[3], 0.017, W, -2.0,
                t_off=SHOWER_FULL + 0.2, brk=0.14 + 0.05 * i, n_drops=5, wobble=0.016, splash=(i == 0))
     # AFTER the pump: dense, wide, strong cone (three rings, 40 streams) + fine mist
     k = 0
@@ -504,17 +530,12 @@ def build_streams(L):
         for i in range(n):
             a = i / n * 2 * math.pi + ring * 0.21
             Stream(f'Full{k}', (3.5 + r * math.cos(a), 0.45 + r * math.sin(a), 11.26),
-                   (out * math.cos(a), out * math.sin(a), -2.4), FLOOR_TOPS[3], 0.018, W, SHOWER_FULL,
-                   brk=0.5, n_drops=7, splash=(k % 3 == 0), grow=0.45, splash_v=0.6, splash_n=4, splash_r=0.7)
+                   (out * math.cos(a), out * math.sin(a), -2.4), FLOOR_TOPS[3], 0.0085 + 0.002 * (k % 3), W, SHOWER_FULL,
+                   brk=0.32 + 0.12 * ((k * 7) % 5) / 4, n_drops=12, splash=(k % 3 == 0), grow=0.45, splash_v=0.6, splash_n=4, splash_r=0.7)
             k += 1
     MIST.clear()
     for i in range(70):
         MIST.append(sphere(f'Mist{i}', (3.5, 0.45, 11.0), 1.0, W, seg=8))
-    bpy.ops.mesh.primitive_cone_add(vertices=32, radius1=0.95, radius2=0.12, depth=2.1, location=(3.5, 0.45, 10.2))
-    cone = bpy.context.object; cone.name = 'MistCone'; cone.data.materials.append(L['mist'])
-    for poly in cone.data.polygons:
-        poly.use_smooth = True
-    key_visible(cone, fr(SHOWER_FULL) - 1, False); key_visible(cone, fr(SHOWER_FULL + 0.2), True)
 
 
 MIST = []
@@ -544,6 +565,8 @@ def build_pump(L):
     for o in parts + [pc, imp]:
         o.parent = root; o.matrix_parent_inverse = root.matrix_world.inverted()
     PUMP['imp'] = imp
+    for i, (dx, dy, dz) in enumerate([(x, y, z) for x in (2.95, 3.47) for y in (-0.25, 0.46) for z in (oz - 0.2, oz + 0.44)]):
+        k = anchor(f'kPump{i}', (dx, dy, dz)); k.parent = root; k.matrix_parent_inverse = root.matrix_world.inverted()
     root.location.z = oz + 3.0; root.keyframe_insert('location', index=2, frame=1)
     root.keyframe_insert('location', index=2, frame=fr(PUMP_DROP))
     root.location.z = oz; root.keyframe_insert('location', index=2, frame=fr(PUMP_LAND))
@@ -561,7 +584,8 @@ def build_pump(L):
 # ---------------------------------------------------------------- pipe-water scroll (keyframed texture offset)
 def animate_pipe_water(L):
     m = L['pipeWater']; mp = m.node_tree.nodes['Scroll']
-    keys = [(1, 0.0), (fr(PUMP_LAND), -0.45 * (PUMP_LAND)), (fr(T['END']), -0.45 * PUMP_LAND - 1.2 * (T['END'] - PUMP_LAND))]
+    tb = min(PUMP_SPIN, END)
+    keys = [(1, 0.0), (fr(tb), -0.45 * tb), (fr(END), -0.45 * tb - 1.2 * (END - tb))]
     for f, z in keys:
         mp.inputs['Location'].default_value[2] = -z; mp.inputs['Location'].keyframe_insert('default_value', index=2, frame=f)
     ease_all(m.node_tree)
@@ -580,44 +604,41 @@ def on_frame(scene, depsgraph=None):
         s = (0.006 + 0.004 * ((i * 53) % 10) / 10) if on and m.location.z > FLOOR_TOPS[3] else 0.0
         m.scale = (s, s, s)
     if 'imp' in PUMP:
-        spin = max(0.0, t - PUMP_LAND)
+        spin = max(0.0, t - PUMP_SPIN)
         PUMP['imp'].rotation_euler = (spin * spin * 6.0 if spin < 1 else 6.0 + (spin - 1) * 12.0, 0, 0)
 
 
 # ---------------------------------------------------------------- camera (eased keyframes per shot)
-def shot_keys():
-    B = Vector((B_BASE.x, B_BASE.y, B_BASE.z + B_H / 2))
-    V = lambda *a: Vector(a)
-    return [
-        # S1 — bottle fills ~40% of frame height, shallow DOF
-        (T['S1'],        B + V(-0.04, -1.12, 0.02), B + V(-0.07, 0, -0.03), 45, 1.8),
-        (T['S2'] - 0.1,  B + V(-0.08, -1.04, 0.03), B + V(-0.08, 0, -0.03), 45, 1.8),
-        # S2 — both holes: low jet + high dribble
-        (T['S2'] + 0.7,  B + V(-0.52, -1.02, 0.08), B + V(-0.14, 0, -0.04), 45, 2.2),
-        (T['S3'] - 0.2,  B + V(-0.46, -1.0, 0.10), B + V(-0.12, 0, -0.04), 45, 2.2),
-        # S3 — cutaway orbit
-        (T['S3'] + 0.6,  B + V(-0.30, -0.95, 0.10), B + V(-0.08, 0, -0.03), 45, 2.4),
-        (T['S4'] - 0.2,  B + V(0.10, -1.00, 0.14), B + V(-0.08, 0, -0.02), 45, 2.8),
-        # S4 — scale up to the establishing wide cutaway
-        (T['S4'] + 1.8,  V(-6.0, -9.0, 15.0), V(-1.0, -0.8, 11.5), 42, 6.0),
-        (T['S5'] - 1.4,  V(12.5, -21.5, 10.5), V(0.8, 0.2, 6.9), 40, 9.0),
-        (T['S5'] - 0.2,  V(13.2, -22.2, 10.8), V(0.9, 0.2, 6.9), 40, 9.0),
-        # S5 — ruler + gauges (needles animate as the line is spoken)
-        (T['S5'] + 0.9,  V(10.8, -15.6, 8.4), V(3.0, 0.2, 7.3), 40, 8.0),
-        (T['S5B'] - 0.2, V(10.2, -14.8, 8.0), V(3.0, 0.2, 7.1), 40, 8.0),
-        # S5B — ground-floor gush
-        (T['S5B'] + 0.9, V(5.4, -5.0, 2.2), V(2.85, 0.45, 0.85), 40, 4.5),
-        (T['S6'] - 0.2,  V(5.0, -4.6, 2.0), V(2.85, 0.45, 0.80), 40, 4.5),
-        # S6 — crane up to the weak top-floor shower
-        (T['S6'] + 1.6,  V(6.4, -7.0, 7.0), V(3.2, 0.4, 7.4), 40, 6.0),
-        (T['S6'] + 3.4,  V(5.4, -4.3, 10.9), V(3.5, 0.45, 10.45), 40, 4.0),
-        (T['S7'] - 0.2,  V(5.1, -4.0, 10.7), V(3.5, 0.45, 10.35), 40, 4.0),
-        # S7 — booster pump on the roof: whole tank in frame with headroom, shower below
-        (T['S7'] + 0.7,  V(8.6, -9.6, 13.8), V(2.7, 0.1, 12.0), 40, 7.0),
-        (T['S8'] - 0.2,  V(8.0, -8.8, 13.2), V(2.8, 0.1, 11.8), 40, 7.0),
-        # S8 — reveal
-        (T['END'],       V(14.0, -23.0, 11.0), V(0.8, 0.2, 7.0), 40, 9.0),
-    ]
+def shot_poses():
+    """Start/end pose per shot: (cam_start, cam_end, target_start, target_end, lens, fstop)."""
+    Bc = Vector((B_BASE.x, B_BASE.y, B_BASE.z + B_H / 2)); V = lambda *a: Vector(a)
+    SH_A = (V(4.75, -2.3, 10.45), V(3.45, 0.45, 10.25))      # top-floor shower framing (cold open = loop end)
+    SH_B = (V(4.45, -1.95, 10.40), V(3.47, 0.45, 10.25))
+    return {
+        'C0': (SH_A[0], SH_B[0], SH_A[1], SH_B[1], 40, 4.0),
+        'B1': (Bc + V(-0.30, -1.55, 0.12), Bc + V(-0.36, -1.38, 0.10), Bc + V(-0.15, 0, -0.12), Bc + V(-0.15, 0, -0.12), 45, 2.8),
+        'B2': (Bc + V(-0.62, -0.85, -0.14), Bc + V(-0.66, -0.74, -0.12), Bc + V(-0.32, 0, -0.20), Bc + V(-0.32, 0, -0.18), 45, 2.4),
+        'B3': (Bc + V(-0.24, -0.34, 0.14), Bc + V(-0.20, -0.29, 0.12), Bc + V(-0.05, 0, 0.06), Bc + V(-0.05, 0, 0.05), 50, 2.0),
+        'B4': (Bc + V(-0.45, -0.95, 0.06), Bc + V(-0.30, -0.98, 0.08), Bc + V(-0.08, 0, -0.02), Bc + V(-0.06, 0, -0.02), 45, 2.8),
+        'B5': (Bc + V(0.04, -0.95, 0.0), Bc + V(0.0, -0.82, 0.0), Bc, Bc, 45, 2.8),
+        'M1': (V(1.65, -32.7, 7.2), V(1.65, -30.0, 7.2), V(1.65, 0, 7.2), V(1.65, 0, 7.2), 45, 11.0),   # match-cut: same screen position
+        'M2': (V(13.2, -22.0, 10.8), V(12.4, -20.6, 10.3), V(0.9, 0.2, 6.9), V(0.9, 0.2, 6.9), 40, 9.0),
+        'G1': (V(12.2, -17.8, 8.8), V(11.6, -17.0, 8.5), V(2.9, 0.2, 7.0), V(2.9, 0.2, 7.0), 40, 8.0),
+        'G2': (V(7.6, -10.2, 6.2), V(8.4, -9.4, 6.6), V(2.4, 0.45, 6.2), V(2.4, 0.45, 6.3), 40, 7.0),
+        'G3': (V(6.2, -6.0, 2.0), V(5.8, -5.6, 1.9), V(2.95, 0.45, 1.05), V(2.95, 0.45, 1.0), 40, 4.5),
+        'T1': (V(8.0, -8.6, 12.4), V(7.4, -8.0, 12.2), V(2.6, 0.2, 11.8), V(2.6, 0.2, 11.7), 40, 7.0),
+        'T2': (V(5.6, -5.0, 12.9), V(5.3, -4.6, 12.7), V(2.8, 0.3, 12.4), V(2.8, 0.3, 12.3), 40, 5.0),
+        'T3': (V(4.25, -1.55, 10.5), V(4.05, -1.35, 10.42), V(3.5, 0.45, 10.3), V(3.5, 0.45, 10.3), 40, 3.5),
+        'P1': (V(6.4, -6.4, 14.2), V(6.0, -6.0, 13.9), V(2.9, 0.1, 12.7), V(2.9, 0.1, 12.7), 40, 6.0),
+        'P2': (V(4.5, -1.5, 13.15), V(4.3, -1.25, 13.0), V(3.21, 0, 12.66), V(3.21, 0, 12.66), 45, 3.5),
+        'P3': (V(3.75, -1.55, 11.55), V(3.6, -1.35, 11.45), V(2.95, 0.45, 11.35), V(2.95, 0.45, 11.35), 45, 3.5),
+        'P4': (SH_B[0], SH_A[0], SH_B[1], SH_A[1], 40, 4.0),   # reverse of C0: ends exactly on the cold-open frame
+    }
+
+
+def ease_move(u):
+    """Smoothstep blended with linear: eased, but the camera never stops inside a shot."""
+    return 0.3 * u + 0.7 * (u * u * (3 - 2 * u))
 
 
 def build_camera():
@@ -626,14 +647,24 @@ def build_camera():
     bpy.ops.object.camera_add(); cam = bpy.context.object; cam.name = 'Cam'; sc.camera = cam
     con = cam.constraints.new('TRACK_TO'); con.target = tgt; con.track_axis = 'TRACK_NEGATIVE_Z'; con.up_axis = 'UP_Y'
     cam.data.dof.use_dof = True; cam.data.dof.focus_object = tgt; cam.data.sensor_width = 36
-    for (t, p, g, lens, fstop) in shot_keys():
-        f = fr(t)
-        cam.location = p; cam.keyframe_insert('location', frame=f)
-        tgt.location = g; tgt.keyframe_insert('location', frame=f)
-        cam.data.lens = lens; cam.data.keyframe_insert('lens', frame=f)
-        cam.data.dof.aperture_fstop = fstop; cam.data.dof.keyframe_insert('aperture_fstop', frame=f)
+    P = shot_poses()
+    last_frames = set()
+    for sh in SHOTS:
+        c0, c1, g0, g1, lens, fstop = P[sh['name']]
+        f0, f1 = fr(sh['t0']), fr(sh['t1']) - 1
+        if sh is SHOTS[-1]:
+            f1 = fr(END)
+        for f in range(f0, f1 + 1):
+            u = ease_move((f - f0) / max(1, f1 - f0))
+            cam.location = c0.lerp(c1, u); cam.keyframe_insert('location', frame=f)
+            tgt.location = g0.lerp(g1, u); tgt.keyframe_insert('location', frame=f)
+            cam.data.lens = lens; cam.data.keyframe_insert('lens', frame=f)
+            cam.data.dof.aperture_fstop = fstop; cam.data.dof.keyframe_insert('aperture_fstop', frame=f)
+        last_frames.add(f1)
     for idb in (cam, tgt, cam.data):
-        ease_all(idb)
+        for fc in fcurves_of(idb):
+            for kp in fc.keyframe_points:
+                kp.interpolation = 'CONSTANT' if int(round(kp.co[0])) in last_frames else 'BEZIER'
     return cam
 
 
@@ -659,6 +690,7 @@ def setup_render(a):
         sc.cycles.max_bounces = 12; sc.cycles.transmission_bounces = 12; sc.cycles.glossy_bounces = 3
         sc.cycles.caustics_reflective = False; sc.cycles.caustics_refractive = False
         sc.render.use_motion_blur = not a.no_blur; sc.render.motion_blur_shutter = 0.5
+        sc.render.motion_blur_position = 'START'   # shutter opens at the frame: no smear across cuts
 
 
 def build_all():
@@ -681,7 +713,7 @@ def build_all():
 
 
 def export_anchors(path):
-    """Per-frame normalized screen positions (x right, y down) of label anchors."""
+    """Per-frame normalized screen positions (x right, y down) of label anchors, for post overlays."""
     from bpy_extras.object_utils import world_to_camera_view
     sc = bpy.context.scene; cam = sc.camera
     names = [o for o in bpy.data.objects if o.name.startswith('A_')]

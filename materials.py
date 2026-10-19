@@ -1,4 +1,9 @@
-"""Shared material library."""
+"""Shared material library — stylized technical-cutaway look.
+
+Matte painted metals, warm wood, sandy ground, translucent plastic/water,
+and the orange diagonal-hatch material used on every boolean cut face.
+No pure black or white anywhere; roughness 0.4–0.7 for painted surfaces.
+"""
 import bpy
 
 

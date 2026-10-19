@@ -2,11 +2,14 @@ name: render
 on:
   workflow_dispatch:
     inputs:
-      frames:  { description: "Frame range START-END", default: "1-948" }
-      chunks:  { description: "Number of parallel jobs (max 20)", default: "20" }
+      frames:  { description: "Frame ranges, comma separated: START-END[,START-END...]", default: "1-951" }
+      chunks:  { description: "Number of parallel render jobs (max 20)", default: "20" }
       res:     { description: "Resolution WxH", default: "720x1280" }
       samples: { description: "Cycles samples", default: "32" }
-      only:    { description: "Comma list of chunk indexes to re-run (blank = all)", default: "" }
+      extra:   { description: "Extra scene.py flags (e.g. --before)", default: "" }
+
+permissions:
+  contents: write
 
 jobs:
   plan:
@@ -15,19 +18,19 @@ jobs:
       matrix: ${{ steps.m.outputs.matrix }}
     steps:
       - id: m
-        env: { FR: "${{ inputs.frames }}", CH: "${{ inputs.chunks }}", ONLY: "${{ inputs.only }}" }
+        env: { FR: "${{ inputs.frames }}", CH: "${{ inputs.chunks }}" }
         run: |
           python3 - >> "$GITHUB_OUTPUT" <<'PY'
           import json, os
-          s, e = map(int, os.environ["FR"].split("-")); n = min(20, int(os.environ["CH"]))
-          only = [int(x) for x in os.environ["ONLY"].split(",") if x.strip()]
-          size = -(-(e - s + 1) // n); inc = []
-          for i in range(n):
-              a = s + i * size; b = min(e, a + size - 1)
-              if a > e: break
-              if only and i not in only: continue
-              inc.append({"idx": i, "range": f"{a}-{b}"})
-          print("matrix=" + json.dumps({"include": inc}))
+          segs = [tuple(map(int, r.split("-"))) for r in os.environ["FR"].split(",") if r.strip()]
+          total = sum(e - s + 1 for s, e in segs); n = max(1, min(20, int(os.environ["CH"])))
+          size = -(-total // n); inc = []
+          for s, e in segs:                      # chunks never cross a segment boundary
+              a = s
+              while a <= e:
+                  b = min(e, a + size - 1)
+                  inc.append({"idx": len(inc), "range": f"{a}-{b}"}); a = b + 1
+          print("matrix=" + json.dumps({"include": inc[:20]}))
           PY
 
   render:
@@ -47,10 +50,47 @@ jobs:
       - name: Install bpy
         run: pip install -q bpy==5.2.2
       - name: Render chunk ${{ matrix.idx }} (${{ matrix.range }})
-        run: python scene.py --frames ${{ matrix.range }} --res ${{ inputs.res }} --samples ${{ inputs.samples }} --out out
+        run: python scene.py --frames ${{ matrix.range }} --res ${{ inputs.res }} --samples ${{ inputs.samples }} ${{ inputs.extra }} --out out
       - uses: actions/upload-artifact@v4
         with:
           name: frames-${{ matrix.idx }}
           path: out/*.png
           retention-days: 1
           if-no-files-found: error
+
+  encode:
+    # silent H.264 (CRF 14) per frame range, force-pushed to the orphan branch "out"
+    needs: render
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { pattern: "frames-*", merge-multiple: true, path: frames }
+      - name: Install ffmpeg
+        run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+      - name: Encode
+        env: { FR: "${{ inputs.frames }}" }
+        run: |
+          mkdir -p mp4
+          for r in ${FR//,/ }; do
+            s=${r%-*}; e=${r#*-}; n=$((e - s + 1))
+            ffmpeg -y -loglevel error -framerate 24 -start_number "$s" -i frames/frame_%04d.png -frames:v "$n" \
+              -an -c:v libx264 -preset slow -crf 14 -pix_fmt yuv420p -movflags +faststart "mp4/frames-$s-$e.mp4"
+            sz=$(stat -c %s "mp4/frames-$s-$e.mp4")
+            if [ "$sz" -gt 95000000 ]; then        # keep every file under GitHub's 100 MB limit
+              rm "mp4/frames-$s-$e.mp4"
+              for ((a = s; a <= e; a += 240)); do b=$((a + 239 < e ? a + 239 : e))
+                ffmpeg -y -loglevel error -framerate 24 -start_number "$a" -i frames/frame_%04d.png -frames:v $((b - a + 1)) \
+                  -an -c:v libx264 -preset slow -crf 14 -pix_fmt yuv420p -movflags +faststart "mp4/frames-$a-$b.mp4"
+              done
+            fi
+          done
+          ls -l mp4
+      - name: Push to branch "out"
+        run: |
+          git config user.name "render-bot"; git config user.email "render-bot@users.noreply.github.com"
+          git checkout --orphan out
+          git rm -rf -q --cached .
+          git add -f mp4/*.mp4
+          git commit -q -m "frames ${{ inputs.frames }} @ ${{ inputs.res }}"
+          git push -f origin out
