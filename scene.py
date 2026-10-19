@@ -24,9 +24,9 @@ import materials  # noqa: E402
 
 FPS = 24
 # >>> CUES (generated — numbers only)
-EV = {"HOLE_LOW_OPEN": 5.267, "HOLE_HIGH_OPEN": 8.552, "BOTTLE_CUT": 10.094, "NEEDLES": [19.638, 19.988, 20.338, 20.688], "PUMP_DROP": 30.639, "PUMP_SPIN": 32.288, "PUMP_LAND": 31.239, "BOOST_T": 34.084, "SHOWER_FULL": 35.384}
-SHOTS = [{"name": "C0", "t0": 0.0, "t1": 2.592}, {"name": "B1", "t0": 2.592, "t1": 4.497}, {"name": "B2", "t0": 4.497, "t1": 7.562}, {"name": "B3", "t0": 7.562, "t1": 10.094}, {"name": "B4", "t0": 10.094, "t1": 12.393}, {"name": "B5", "t0": 12.393, "t1": 14.483}, {"name": "M1", "t0": 14.483, "t1": 16.447}, {"name": "M2", "t0": 16.447, "t1": 17.935}, {"name": "G1", "t0": 17.935, "t1": 19.338}, {"name": "G2", "t0": 19.338, "t1": 21.767}, {"name": "G3", "t0": 21.767, "t1": 24.087}, {"name": "T1", "t0": 24.087, "t1": 26.961}, {"name": "T2", "t0": 26.961, "t1": 28.899}, {"name": "T3", "t0": 28.899, "t1": 30.489}, {"name": "P1", "t0": 30.489, "t1": 32.138}, {"name": "P2", "t0": 32.138, "t1": 33.834}, {"name": "P3", "t0": 33.834, "t1": 35.084}, {"name": "P4", "t0": 35.084, "t1": 39.58}]
-END = 39.58
+EV = {"HOLE_LOW_OPEN": 5.544, "HOLE_HIGH_OPEN": 8.911, "BOTTLE_CUT": 10.451, "NEEDLES": [19.604, 19.954, 20.304, 20.654], "PUMP_DROP": 30.765, "PUMP_SPIN": 32.48, "PUMP_LAND": 31.365, "BOOST_T": 34.334, "SHOWER_FULL": 35.634}
+SHOTS = [{"name": "C0", "t0": 0.0, "t1": 2.843}, {"name": "B1", "t0": 2.843, "t1": 4.729}, {"name": "B2", "t0": 4.729, "t1": 7.896}, {"name": "B3", "t0": 7.896, "t1": 10.451}, {"name": "B4", "t0": 10.451, "t1": 12.726}, {"name": "B5", "t0": 12.726, "t1": 14.756}, {"name": "M1", "t0": 14.756, "t1": 16.547}, {"name": "M2", "t0": 16.547, "t1": 17.876}, {"name": "G1", "t0": 17.876, "t1": 19.304}, {"name": "G2", "t0": 19.304, "t1": 21.763}, {"name": "G3", "t0": 21.763, "t1": 24.075}, {"name": "T1", "t0": 24.075, "t1": 27.03}, {"name": "T2", "t0": 27.03, "t1": 29.023}, {"name": "T3", "t0": 29.023, "t1": 30.615}, {"name": "P1", "t0": 30.615, "t1": 32.33}, {"name": "P2", "t0": 32.33, "t1": 34.084}, {"name": "P3", "t0": 34.084, "t1": 35.334}, {"name": "P4", "t0": 35.334, "t1": 39.83}]
+END = 39.83
 # <<< CUES
 T = dict(END=END)
 HOLE_LOW_OPEN, HOLE_HIGH_OPEN, BOTTLE_CUT = EV['HOLE_LOW_OPEN'], EV['HOLE_HIGH_OPEN'], EV['BOTTLE_CUT']
@@ -444,6 +444,9 @@ def gauge(name, loc, L, value, boosted=None, stem=None, label_side=1):
     hub = cyl(f'{name}Hub', (0, 0, 0), 0.036, 0.018, L['navy'], rot=(math.radians(90), 0, 0), bevel=0, verts=20); hub.parent = piv
     ang = lambda v: math.radians(-120 + 240 * min(1.0, v / 2.5))
     t_cue = NEEDLE_CUE[name]
+    if name == 'G3':        # top floor: already reads its low value on frame 1 (cold open = loop end), dips and re-springs at its cue
+        piv.rotation_euler = (0, ang(value), 0)
+        piv.keyframe_insert('rotation_euler', index=1, frame=1); piv.keyframe_insert('rotation_euler', index=1, frame=fr(t_cue) - 4)
     piv.rotation_euler = (0, ang(0), 0); piv.keyframe_insert('rotation_euler', index=1, frame=fr(t_cue))
     piv.rotation_euler = (0, ang(value), 0); piv.keyframe_insert('rotation_euler', index=1, frame=fr(t_cue + 0.7))
     if boosted:
@@ -612,8 +615,8 @@ def on_frame(scene, depsgraph=None):
 def shot_poses():
     """Start/end pose per shot: (cam_start, cam_end, target_start, target_end, lens, fstop)."""
     Bc = Vector((B_BASE.x, B_BASE.y, B_BASE.z + B_H / 2)); V = lambda *a: Vector(a)
-    SH_A = (V(4.75, -2.3, 10.45), V(3.45, 0.45, 10.25))      # top-floor shower framing (cold open = loop end)
-    SH_B = (V(4.45, -1.95, 10.40), V(3.47, 0.45, 10.25))
+    SH_A = (V(3.10, -2.85, 11.0), V(3.30, 0.45, 10.45))     # top-floor shower framing (cold open = loop end)
+    SH_B = (V(3.20, -2.55, 10.95), V(3.32, 0.45, 10.45))     # front view: the right wall's cut face stays out of shot
     return {
         'C0': (SH_A[0], SH_B[0], SH_A[1], SH_B[1], 40, 4.0),
         'B1': (Bc + V(-0.30, -1.55, 0.12), Bc + V(-0.36, -1.38, 0.10), Bc + V(-0.15, 0, -0.12), Bc + V(-0.15, 0, -0.12), 45, 2.8),
@@ -628,7 +631,7 @@ def shot_poses():
         'G3': (V(6.2, -6.0, 2.0), V(5.8, -5.6, 1.9), V(2.95, 0.45, 1.05), V(2.95, 0.45, 1.0), 40, 4.5),
         'T1': (V(8.0, -8.6, 12.4), V(7.4, -8.0, 12.2), V(2.6, 0.2, 11.8), V(2.6, 0.2, 11.7), 40, 7.0),
         'T2': (V(5.6, -5.0, 12.9), V(5.3, -4.6, 12.7), V(2.8, 0.3, 12.4), V(2.8, 0.3, 12.3), 40, 5.0),
-        'T3': (V(4.25, -1.55, 10.5), V(4.05, -1.35, 10.42), V(3.5, 0.45, 10.3), V(3.5, 0.45, 10.3), 40, 3.5),
+        'T3': (V(3.25, -2.35, 10.9), V(3.3, -2.05, 10.85), V(3.38, 0.45, 10.4), V(3.38, 0.45, 10.4), 40, 3.5),
         'P1': (V(6.4, -6.4, 14.2), V(6.0, -6.0, 13.9), V(2.9, 0.1, 12.7), V(2.9, 0.1, 12.7), 40, 6.0),
         'P2': (V(4.5, -1.5, 13.15), V(4.3, -1.25, 13.0), V(3.21, 0, 12.66), V(3.21, 0, 12.66), 45, 3.5),
         'P3': (V(3.75, -1.55, 11.55), V(3.6, -1.35, 11.45), V(2.95, 0.45, 11.35), V(2.95, 0.45, 11.35), 45, 3.5),
