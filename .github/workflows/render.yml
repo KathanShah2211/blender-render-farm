@@ -2,7 +2,7 @@ name: render
 on:
   workflow_dispatch:
     inputs:
-      frames:  { description: "Frame ranges, comma separated: START-END[,START-END...]", default: "1-951" }
+      frames:  { description: "Frame ranges: START-END[,START-END...]; prefix b (b700-766) = render with --before", default: "1-766" }
       chunks:  { description: "Number of parallel render jobs (max 20)", default: "20" }
       res:     { description: "Resolution WxH", default: "720x1280" }
       samples: { description: "Cycles samples", default: "32" }
@@ -31,14 +31,18 @@ jobs:
         run: |
           python3 - >> "$GITHUB_OUTPUT" <<'PY'
           import json, os
-          segs = [tuple(map(int, r.split("-"))) for r in os.environ["FR"].split(",") if r.strip()]
-          total = sum(e - s + 1 for s, e in segs); n = max(1, min(20, int(os.environ["CH"])))
+          segs = []
+          for r in os.environ["FR"].split(","):
+              r = r.strip()
+              if r:
+                  bf = r.startswith("b"); s, e = map(int, r.lstrip("b").split("-")); segs.append((s, e, bf))
+          total = sum(e - s + 1 for s, e, _ in segs); n = max(1, min(20, int(os.environ["CH"])))
           size = -(-total // n); inc = []
-          for s, e in segs:                      # chunks never cross a segment boundary
+          for s, e, bf in segs:                  # chunks never cross a segment boundary
               a = s
               while a <= e:
                   b = min(e, a + size - 1)
-                  inc.append({"idx": len(inc), "range": f"{a}-{b}"}); a = b + 1
+                  inc.append({"idx": len(inc), "range": f"{a}-{b}", "extra": "--before" if bf else ""}); a = b + 1
           print("matrix=" + json.dumps({"include": inc[:20]}))
           PY
 
@@ -59,7 +63,7 @@ jobs:
       - name: Install bpy
         run: pip install -q bpy==5.2.2
       - name: Render chunk ${{ matrix.idx }} (${{ matrix.range }})
-        run: python scene.py --frames ${{ matrix.range }} --res ${{ inputs.res }} --samples ${{ inputs.samples }} ${{ inputs.extra }} --out out
+        run: python scene.py --frames ${{ matrix.range }} --res ${{ inputs.res }} --samples ${{ inputs.samples }} ${{ matrix.extra }} ${{ inputs.extra }} --out out
       - uses: actions/upload-artifact@v4
         with:
           name: frames-${{ matrix.idx }}
@@ -82,15 +86,16 @@ jobs:
         run: |
           mkdir -p mp4
           for r in ${FR//,/ }; do
+            pre=frame; tag=""; case $r in b*) pre=before; tag=b; r=${r#b};; esac
             s=${r%-*}; e=${r#*-}; n=$((e - s + 1))
-            ffmpeg -y -loglevel error -framerate 24 -start_number "$s" -i frames/frame_%04d.png -frames:v "$n" \
-              -an -c:v libx264 -preset slow -crf 14 -pix_fmt yuv420p -movflags +faststart "mp4/frames-$s-$e.mp4"
-            sz=$(stat -c %s "mp4/frames-$s-$e.mp4")
+            ffmpeg -y -loglevel error -framerate 24 -start_number "$s" -i frames/${pre}_%04d.png -frames:v "$n" \
+              -an -c:v libx264 -preset slow -crf 14 -pix_fmt yuv420p -movflags +faststart "mp4/frames-$tag$s-$e.mp4"
+            sz=$(stat -c %s "mp4/frames-$tag$s-$e.mp4")
             if [ "$sz" -gt 95000000 ]; then        # keep every file under GitHub's 100 MB limit
-              rm "mp4/frames-$s-$e.mp4"
+              rm "mp4/frames-$tag$s-$e.mp4"
               for ((a = s; a <= e; a += 240)); do b=$((a + 239 < e ? a + 239 : e))
-                ffmpeg -y -loglevel error -framerate 24 -start_number "$a" -i frames/frame_%04d.png -frames:v $((b - a + 1)) \
-                  -an -c:v libx264 -preset slow -crf 14 -pix_fmt yuv420p -movflags +faststart "mp4/frames-$a-$b.mp4"
+                ffmpeg -y -loglevel error -framerate 24 -start_number "$a" -i frames/${pre}_%04d.png -frames:v $((b - a + 1)) \
+                  -an -c:v libx264 -preset slow -crf 14 -pix_fmt yuv420p -movflags +faststart "mp4/frames-$tag$a-$b.mp4"
               done
             fi
           done
