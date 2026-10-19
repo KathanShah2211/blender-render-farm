@@ -7,12 +7,21 @@ on:
       res:     { description: "Resolution WxH", default: "720x1280" }
       samples: { description: "Cycles samples", default: "32" }
       extra:   { description: "Extra scene.py flags (e.g. --before)", default: "" }
+      cleanup: { description: "yes = only delete the branch out (after it was fetched)", default: "no" }
 
 permissions:
   contents: write
 
 jobs:
+  cleanup:
+    if: inputs.cleanup == 'yes'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git push origin --delete out || true
+
   plan:
+    if: inputs.cleanup != 'yes'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.m.outputs.matrix }}
