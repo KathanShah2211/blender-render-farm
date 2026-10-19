@@ -24,9 +24,9 @@ import materials  # noqa: E402
 
 FPS = 24
 # >>> CUES (generated — numbers only)
-EV = {"HOLE_LOW_OPEN": 5.544, "HOLE_HIGH_OPEN": 8.911, "BOTTLE_CUT": 10.451, "NEEDLES": [19.604, 19.954, 20.304, 20.654], "PUMP_DROP": 30.765, "PUMP_SPIN": 32.48, "PUMP_LAND": 31.365, "BOOST_T": 34.334, "SHOWER_FULL": 35.634}
-SHOTS = [{"name": "C0", "t0": 0.0, "t1": 2.843}, {"name": "B1", "t0": 2.843, "t1": 4.729}, {"name": "B2", "t0": 4.729, "t1": 7.896}, {"name": "B3", "t0": 7.896, "t1": 10.451}, {"name": "B4", "t0": 10.451, "t1": 12.726}, {"name": "B5", "t0": 12.726, "t1": 14.756}, {"name": "M1", "t0": 14.756, "t1": 16.547}, {"name": "M2", "t0": 16.547, "t1": 17.876}, {"name": "G1", "t0": 17.876, "t1": 19.304}, {"name": "G2", "t0": 19.304, "t1": 21.763}, {"name": "G3", "t0": 21.763, "t1": 24.075}, {"name": "T1", "t0": 24.075, "t1": 27.03}, {"name": "T2", "t0": 27.03, "t1": 29.023}, {"name": "T3", "t0": 29.023, "t1": 30.615}, {"name": "P1", "t0": 30.615, "t1": 32.33}, {"name": "P2", "t0": 32.33, "t1": 34.084}, {"name": "P3", "t0": 34.084, "t1": 35.334}, {"name": "P4", "t0": 35.334, "t1": 39.83}]
-END = 39.83
+EV = {"HOLE_LOW_OPEN": 4.732, "HOLE_HIGH_OPEN": 7.636, "BOTTLE_CUT": 8.96, "NEEDLES": [16.627, 16.977, 17.327, 17.677], "PUMP_DROP": 26.3, "PUMP_SPIN": 27.785, "PUMP_LAND": 26.9, "BOOST_T": 29.205, "SHOWER_FULL": 29.805}
+SHOTS = [{"name": "C0", "t0": 0.0, "t1": 2.43}, {"name": "B1", "t0": 2.43, "t1": 4.06}, {"name": "B2", "t0": 4.06, "t1": 6.77}, {"name": "B3", "t0": 6.77, "t1": 8.96}, {"name": "B4", "t0": 8.96, "t1": 10.942}, {"name": "B5", "t0": 10.942, "t1": 12.57}, {"name": "M1", "t0": 12.57, "t1": 14.096}, {"name": "M2", "t0": 14.096, "t1": 15.24}, {"name": "G1", "t0": 15.24, "t1": 16.327}, {"name": "G2", "t0": 16.327, "t1": 18.62}, {"name": "G3", "t0": 18.62, "t1": 20.64}, {"name": "T1", "t0": 20.64, "t1": 23.017}, {"name": "T2", "t0": 23.017, "t1": 24.7}, {"name": "T3", "t0": 24.7, "t1": 26.15}, {"name": "P1", "t0": 26.15, "t1": 27.635}, {"name": "P2", "t0": 27.635, "t1": 28.955}, {"name": "P3", "t0": 28.955, "t1": 29.655}, {"name": "P4", "t0": 29.655, "t1": 31.88}]
+END = 31.88
 # <<< CUES
 T = dict(END=END)
 HOLE_LOW_OPEN, HOLE_HIGH_OPEN, BOTTLE_CUT = EV['HOLE_LOW_OPEN'], EV['HOLE_HIGH_OPEN'], EV['BOTTLE_CUT']
@@ -199,8 +199,9 @@ class Stream:
     plus an optional splash where it lands. Shape is recomputed per frame (wobble, growth)."""
 
     def __init__(self, name, origin, vel, land_z, r0, mat, t_on, t_off=None, brk=0.6, n_drops=10,
-                 wobble=0.0, splash=True, cling=None, grow=0.35, splash_v=0.35, splash_n=6, splash_r=0.6, puddle=False):
-        self.splash_v, self.splash_r, self.puddle = splash_v, splash_r, puddle
+                 wobble=0.0, splash=True, cling=None, grow=0.35, splash_v=0.35, splash_n=6, splash_r=0.6, wet_r=0.0, wet_mat=None,
+                 layer=0):
+        self.splash_v, self.splash_r, self.wet_r, self.layer = splash_v, splash_r, wet_r, layer
         self.name, self.o, self.v, self.land_z = name, Vector(origin), Vector(vel), land_z
         self.r0, self.t_on, self.t_off, self.brk, self.wobble, self.cling, self.grow = r0, t_on, t_off, brk, wobble, cling, grow
         # flight time to land_z (solve z0 + vz t - g t^2/2 = land_z)
@@ -218,15 +219,11 @@ class Stream:
         if splash:
             for i in range(splash_n):
                 self.spl.append(sphere(f'{name}_s{i}', origin, 1.0, mat, seg=8))
-            if puddle:   # small flat puddle instead of a ripple ring
-                bpy.ops.mesh.primitive_cylinder_add(vertices=24, radius=1.0, depth=0.06, location=origin)
-                self.ring = bpy.context.object; self.ring.name = f'{name}_puddle'; self.ring.data.materials.append(mat)
-                b = self.ring.modifiers.new('Bevel', 'BEVEL'); b.width = 0.02; b.segments = 3
-            else:
-                bpy.ops.mesh.primitive_torus_add(major_radius=1.0, minor_radius=0.12, location=origin)
-                self.ring = bpy.context.object; self.ring.name = f'{name}_ring'; self.ring.data.materials.append(mat)
-        else:
-            self.ring = None
+        self.ring = None
+        if splash and wet_r > 0:   # soft shiny wet patch that spreads (radial alpha falloff, no outline)
+            bpy.ops.mesh.primitive_circle_add(vertices=40, radius=1.0, fill_type='NGON', location=origin)
+            self.ring = bpy.context.object; self.ring.name = f'{name}_wet'; self.ring.data.materials.append(wet_mat)
+        self.splash = splash
         STREAMS.append(self)
 
     def pos(self, tau, t, wob=True):
@@ -268,29 +265,27 @@ class Stream:
             s = r if vis else 0.0
             d.scale = (s, s, s * 1.8)                              # slightly elongated along motion
         # splash at the landing point
-        if self.ring is not None:
+        if self.splash:
             land = self.pos(self.t_end, t, False)
             lv = on and g >= 1.0
-            for i, s in enumerate(self.spl):
-                ph = ((t - self.t_on) * 2.2 + i * 0.618) % 1.0
-                a = i * 2.399 + 0.7                                   # golden-angle spread
-                sp_v = self.splash_v * (0.7 + 0.6 * ((i * 53) % 10) / 10)
-                tt = ph * 0.32
-                h = sp_v * 1.3 * tt - 0.5 * G * tt * tt + 0.003
-                s.location = (land.x + math.cos(a) * sp_v * tt, land.y + math.sin(a) * sp_v * tt, self.land_z + max(0.0, h))
-                rr = self.r0 * self.splash_r * (1 - 0.6 * ph) if lv and h > -0.02 else 0.0
-                s.scale = (rr, rr, rr)
-            if self.puddle:
-                grow = min(1.0, max(0.0, (t - self.t_on) / 3.0))
-                rs = (0.008 + 0.022 * (1 - (1 - grow) ** 2)) if lv else 0.0
-                self.ring.location = (land.x - rs * 0.6, land.y, self.land_z + 0.001)
-                self.ring.scale = (rs, rs * 0.9, 0.04)
-            else:
-                ph = ((t - self.t_on) * 1.6) % 1.0
-                rs = (self.r0 * 3 + self.r0 * 9 * ph) if lv else 0.0
-                self.ring.location = (land.x, land.y, self.land_z + 0.002)
-                self.ring.scale = (rs, rs, rs * 0.25)
-            self.ring.hide_render = not lv
+            n = len(self.spl)
+            for i, s in enumerate(self.spl):              # crown: droplets thrown up and out in a ring on impact
+                ph = ((t - self.t_on) * 2.6 + i * 0.618) % 1.0
+                a = i / max(1, n) * 2 * math.pi + 0.37 * math.sin(i * 1.7)
+                sp_v = self.splash_v * (0.75 + 0.5 * ((i * 53) % 10) / 10)
+                tt = ph * 0.26
+                h = sp_v * 1.6 * tt - 0.5 * G * tt * tt
+                rr0 = self.r0 * 1.2
+                s.location = (land.x + math.cos(a) * (rr0 + sp_v * 0.7 * tt), land.y + math.sin(a) * (rr0 + sp_v * 0.7 * tt),
+                              self.land_z + max(0.0, h) + 0.002)
+                rr = self.r0 * self.splash_r * (1 - 0.55 * ph) if lv and h > -0.01 else 0.0
+                s.scale = (rr, rr, rr * 1.4)
+            if self.ring is not None:
+                grow = min(1.0, max(0.0, (t - self.t_on - 0.1) / 1.6))
+                rs = self.wet_r * (0.25 + 0.75 * (1 - (1 - grow) ** 2)) if lv else 0.0
+                self.ring.location = (land.x, land.y, self.land_z + 0.0012 + 0.0004 * self.layer)
+                self.ring.scale = (rs, rs * 0.92, 1.0)
+                self.ring.hide_render = not lv
 
 
 # ---------------------------------------------------------------- world, lights, ground
@@ -513,11 +508,12 @@ def build_bottle(L):
 def build_streams(L):
     W = L['glassWater']; o = B_BASE
     v_low = math.sqrt(2 * G * (WATER_LVL - HOLE_LOW))                    # ≈ 2.3 m/s (Torricelli)
-    Stream('JetLow', (o.x - B_R - 0.003, o.y, o.z + HOLE_LOW), (-v_low, 0, 0), ROOF_Z, 0.011, W, HOLE_LOW_OPEN,
-           brk=0.28, n_drops=26, splash_v=0.45, splash_n=10, splash_r=0.7)
+    WET = L['wet']
+    Stream('JetLow', (o.x - B_R - 0.003, o.y, o.z + HOLE_LOW), (-v_low, 0, 0), ROOF_Z, 0.022, W, HOLE_LOW_OPEN,
+           brk=0.3, n_drops=26, splash_v=0.5, splash_n=14, splash_r=0.45, wet_r=0.11, wet_mat=WET)
     # high hole: only 1.5 cm of water above it → a weak dribble that clings and runs down the bottle side
     Stream('DribbleHigh', (o.x - B_R - 0.003, o.y, o.z + HOLE_HIGH), (0, 0, 0), o.z, 0.0065, W, HOLE_HIGH_OPEN,
-           brk=0.7, n_drops=6, wobble=0.004, splash=True, splash_n=0, puddle=True,
+           brk=0.7, n_drops=6, wobble=0.004, splash=True, splash_n=4, splash_v=0.12, splash_r=0.5, wet_r=0.035, wet_mat=WET,
            cling=(o.x - B_R - 0.004, o.y, o.z + 0.002), grow=1.2)
     # ground-floor tap: thick, fast gush that splashes out of the bucket
     z0 = FLOOR_TOPS[0] + 1.15 - 0.06
@@ -526,7 +522,8 @@ def build_streams(L):
     # top-floor shower BEFORE the pump: weak, wobbly dribbles + drips (approved look)
     for i, (dx, dy) in enumerate([(-0.06, 0.0), (0.03, 0.05), (0.05, -0.04), (-0.02, -0.06)]):
         Stream(f'Weak{i}', (3.5 + dx, 0.45 + dy, 11.26), (0.02 * dx, 0.02 * dy, -0.05), FLOOR_TOPS[3], 0.017, W, -2.0,
-               t_off=SHOWER_FULL + 0.2, brk=0.14 + 0.05 * i, n_drops=5, wobble=0.016, splash=(i == 0))
+               t_off=SHOWER_FULL + 0.2, brk=0.14 + 0.05 * i, n_drops=5, wobble=0.016, splash=(i == 0),
+               splash_v=0.2, splash_n=5, splash_r=0.5, wet_r=0.12, wet_mat=WET, layer=1)
     # AFTER the pump: dense, wide, strong cone (three rings, 40 streams) + fine mist
     k = 0
     for ring, (n, r, out) in enumerate([(8, 0.04, 0.35), (14, 0.09, 0.8), (18, 0.14, 1.25)]):
@@ -534,7 +531,8 @@ def build_streams(L):
             a = i / n * 2 * math.pi + ring * 0.21
             Stream(f'Full{k}', (3.5 + r * math.cos(a), 0.45 + r * math.sin(a), 11.26),
                    (out * math.cos(a), out * math.sin(a), -2.4), FLOOR_TOPS[3], 0.0085 + 0.002 * (k % 3), W, SHOWER_FULL,
-                   brk=0.32 + 0.12 * ((k * 7) % 5) / 4, n_drops=12, splash=(k % 3 == 0), grow=0.45, splash_v=0.6, splash_n=4, splash_r=0.7)
+                   brk=0.32 + 0.12 * ((k * 7) % 5) / 4, n_drops=12, splash=(k % 3 == 0), grow=0.45, splash_v=0.6, splash_n=4, splash_r=0.7,
+                   wet_r=(0.42 if k == 0 else 0.0), wet_mat=WET, layer=2)   # one soft wet patch under the shower
             k += 1
     MIST.clear()
     for i in range(70):
@@ -615,12 +613,18 @@ def on_frame(scene, depsgraph=None):
 def shot_poses():
     """Start/end pose per shot: (cam_start, cam_end, target_start, target_end, lens, fstop)."""
     Bc = Vector((B_BASE.x, B_BASE.y, B_BASE.z + B_H / 2)); V = lambda *a: Vector(a)
-    SH_A = (V(3.10, -2.85, 11.0), V(3.30, 0.45, 10.45))     # top-floor shower framing (cold open = loop end)
-    SH_B = (V(3.20, -2.55, 10.95), V(3.32, 0.45, 10.45))     # front view: the right wall's cut face stays out of shot
+    SH_T = {s['name']: (s['t0'], s['t1']) for s in SHOTS}
+    v_low = math.sqrt(2 * G * (WATER_LVL - HOLE_LOW)); fall = B_BASE.z + HOLE_LOW - ROOF_Z
+    JET_LAND = V(B_BASE.x - B_R - v_low * math.sqrt(2 * fall / G), B_BASE.y, ROOF_Z)
+    SH_A = (V(3.04, -2.85, 11.0), V(3.08, 0.45, 10.45))     # top-floor shower framing (cold open = loop end)
+    SH_B = (V(3.10, -2.55, 10.95), V(3.10, 0.45, 10.45))     # front view: the right wall's cut face stays out of shot
     return {
         'C0': (SH_A[0], SH_B[0], SH_A[1], SH_B[1], 40, 4.0),
         'B1': (Bc + V(-0.30, -1.55, 0.12), Bc + V(-0.36, -1.38, 0.10), Bc + V(-0.15, 0, -0.12), Bc + V(-0.15, 0, -0.12), 45, 2.8),
-        'B2': (Bc + V(-0.62, -1.75, 0.05), Bc + V(-0.72, -1.55, 0.02), Bc + V(-0.36, 0, -0.24), Bc + V(-0.38, 0, -0.24), 32, 4.0),   # bottle + whole jet arc
+        'B2': dict(lens=45, fstop=3.2, way=[            # bottle ~35% of frame height → follow the jet down to its landing
+            (SH_T['B2'][0], Bc + V(0.05, -1.12, 0.02), Bc + V(-0.03, 0, -0.01)),
+            (HOLE_LOW_OPEN + 0.25, Bc + V(0.0, -1.02, 0.0), Bc + V(-0.07, 0, -0.04)),
+            (SH_T['B2'][1], JET_LAND + V(0.2, -1.3, 0.32), JET_LAND + V(0.16, 0, 0.12))]),
         'B3': (Bc + V(-0.24, -0.34, 0.14), Bc + V(-0.20, -0.29, 0.12), Bc + V(-0.05, 0, 0.06), Bc + V(-0.05, 0, 0.05), 50, 2.0),
         'B4': (Bc + V(-0.45, -0.95, 0.06), Bc + V(-0.30, -0.98, 0.08), Bc + V(-0.08, 0, -0.02), Bc + V(-0.06, 0, -0.02), 45, 2.8),
         'B5': (Bc + V(0.04, -0.95, 0.0), Bc + V(0.0, -0.82, 0.0), Bc, Bc, 45, 2.8),
@@ -631,7 +635,7 @@ def shot_poses():
         'G3': (V(6.2, -6.0, 2.0), V(5.8, -5.6, 1.9), V(2.95, 0.45, 1.05), V(2.95, 0.45, 1.0), 40, 4.5),
         'T1': (V(8.0, -8.6, 12.4), V(7.4, -8.0, 12.2), V(2.6, 0.2, 11.8), V(2.6, 0.2, 11.7), 40, 7.0),
         'T2': (V(5.6, -5.0, 12.9), V(5.3, -4.6, 12.7), V(2.8, 0.3, 12.4), V(2.8, 0.3, 12.3), 40, 5.0),
-        'T3': (V(3.6, -2.5, 11.15), V(3.55, -2.2, 11.1), V(3.45, 0.45, 10.75), V(3.45, 0.45, 10.72), 40, 3.5),
+        'T3': (V(3.12, -2.45, 11.1), V(3.14, -2.2, 11.05), V(3.15, 0.45, 10.72), V(3.16, 0.45, 10.7), 40, 3.5),
         'P1': (V(6.4, -6.4, 14.2), V(6.0, -6.0, 13.9), V(2.9, 0.1, 12.7), V(2.9, 0.1, 12.7), 40, 6.0),
         'P2': (V(5.0, -2.2, 13.45), V(4.7, -1.85, 13.3), V(3.21, 0, 12.6), V(3.21, 0, 12.6), 45, 4.0),
         'P3': (V(3.75, -1.55, 11.55), V(3.6, -1.35, 11.45), V(2.95, 0.45, 11.35), V(2.95, 0.45, 11.35), 45, 3.5),
@@ -653,14 +657,21 @@ def build_camera():
     P = shot_poses()
     last_frames = set()
     for sh in SHOTS:
-        c0, c1, g0, g1, lens, fstop = P[sh['name']]
         f0, f1 = fr(sh['t0']), fr(sh['t1']) - 1
         if sh is SHOTS[-1]:
             f1 = fr(END)
+        p = P[sh['name']]
+        if isinstance(p, dict):
+            lens, fstop, way = p['lens'], p['fstop'], p['way']
+        else:
+            c0, c1, g0, g1, lens, fstop = p
+            way = [(sh['t0'], c0, g0), (sh['t1'], c1, g1)]
+        wf = [fr(w[0]) for w in way]; wf[0], wf[-1] = f0, f1
         for f in range(f0, f1 + 1):
-            u = ease_move((f - f0) / max(1, f1 - f0))
-            cam.location = c0.lerp(c1, u); cam.keyframe_insert('location', frame=f)
-            tgt.location = g0.lerp(g1, u); tgt.keyframe_insert('location', frame=f)
+            k = max(i for i in range(len(way) - 1) if wf[i] <= f) if f < wf[-1] else len(way) - 2
+            u = ease_move(min(1.0, (f - wf[k]) / max(1, wf[k + 1] - wf[k])))
+            cam.location = way[k][1].lerp(way[k + 1][1], u); cam.keyframe_insert('location', frame=f)
+            tgt.location = way[k][2].lerp(way[k + 1][2], u); tgt.keyframe_insert('location', frame=f)
             cam.data.lens = lens; cam.data.keyframe_insert('lens', frame=f)
             cam.data.dof.aperture_fstop = fstop; cam.data.dof.keyframe_insert('aperture_fstop', frame=f)
         last_frames.add(f1)

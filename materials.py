@@ -92,6 +92,23 @@ def shadow_clear(m):
     return m
 
 
+def wet_film(name='WetFilm'):
+    """Thin shiny water film on a floor: clear coat + soft radial alpha falloff, so there is no hard edge."""
+    m = _principled(name, '#B7CCDA', rough=0.03, **{'Coat Weight': 1.0, 'Coat Roughness': 0.02, 'Specular IOR Level': 0.8})
+    nt = m.node_tree; bsdf = nt.nodes.get('Principled BSDF')
+    tc = nt.nodes.new('ShaderNodeTexCoord')
+    gr = nt.nodes.new('ShaderNodeTexGradient'); gr.gradient_type = 'SPHERICAL'
+    ramp = nt.nodes.new('ShaderNodeValToRGB')
+    ramp.color_ramp.elements[0].position = 0.0; ramp.color_ramp.elements[0].color = (0, 0, 0, 1)
+    ramp.color_ramp.elements[1].position = 0.6; ramp.color_ramp.elements[1].color = (0.24, 0.24, 0.24, 1)
+    nt.links.new(tc.outputs['Object'], gr.inputs['Vector']); nt.links.new(gr.outputs['Fac'], ramp.inputs['Fac'])
+    nt.links.new(ramp.outputs['Color'], bsdf.inputs['Alpha'])
+    m.diffuse_color = (0.50, 0.65, 0.76, 0.35)
+    if hasattr(m, 'surface_render_method'):
+        m.surface_render_method = 'BLENDED'
+    return m
+
+
 def library():
     L = {}
     L['navy'] = _principled('PaintNavy', '#1E3246', rough=0.5, metal=0.15)
@@ -128,6 +145,7 @@ def library():
     for k in ('glassWater',):
         shadow_clear(L[k])
     L['hatch'] = hatch()
+    L['wet'] = wet_film()
     L['flow'] = water_flow()
     return L
 
