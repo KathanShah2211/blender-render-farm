@@ -1,0 +1,56 @@
+name: render
+on:
+  workflow_dispatch:
+    inputs:
+      frames:  { description: "Frame range START-END", default: "1-948" }
+      chunks:  { description: "Number of parallel jobs (max 20)", default: "20" }
+      res:     { description: "Resolution WxH", default: "720x1280" }
+      samples: { description: "Cycles samples", default: "32" }
+      only:    { description: "Comma list of chunk indexes to re-run (blank = all)", default: "" }
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env: { FR: "${{ inputs.frames }}", CH: "${{ inputs.chunks }}", ONLY: "${{ inputs.only }}" }
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import json, os
+          s, e = map(int, os.environ["FR"].split("-")); n = min(20, int(os.environ["CH"]))
+          only = [int(x) for x in os.environ["ONLY"].split(",") if x.strip()]
+          size = -(-(e - s + 1) // n); inc = []
+          for i in range(n):
+              a = s + i * size; b = min(e, a + size - 1)
+              if a > e: break
+              if only and i not in only: continue
+              inc.append({"idx": i, "range": f"{a}-{b}"})
+          print("matrix=" + json.dumps({"include": inc}))
+          PY
+
+  render:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - name: System libraries for bpy
+        run: sudo apt-get update -q && sudo apt-get install -y -q libxrender1 libxxf86vm1 libxfixes3 libxi6 libxkbcommon0 libsm6 libgl1 libegl1
+      - name: Install bpy
+        run: pip install -q bpy==5.2.2
+      - name: Render chunk ${{ matrix.idx }} (${{ matrix.range }})
+        run: python scene.py --frames ${{ matrix.range }} --res ${{ inputs.res }} --samples ${{ inputs.samples }} --out out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frames-${{ matrix.idx }}
+          path: out/*.png
+          retention-days: 1
+          if-no-files-found: error
