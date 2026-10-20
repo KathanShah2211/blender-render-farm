@@ -889,7 +889,7 @@ def style(name, L):
 # ================================================================ ANIMATION (shot timeline driven by numeric cues)
 # >>> CUES (generated — numbers only)
 EV = {"XRAY": [7.401, 8.001], "TWENTY": 19.401, "MORPH": 18.485, "HUNT_LABEL": 36.275, "SLAM": 38.367, "DAMPER": 42.216, "NUDGE": 9999.0, "THROW": 9999.0, "CANT": 9999.0, "GRIND": 9999.0}
-SHOTS = [{"name": "H1", "t0": 0.0, "t1": 2.75}, {"name": "H2", "t0": 2.75, "t1": 4.151}, {"name": "H3", "t0": 4.151, "t1": 7.049}, {"name": "H4", "t0": 7.049, "t1": 8.001}, {"name": "P1", "t0": 8.001, "t1": 10.025}, {"name": "P2a", "t0": 10.025, "t1": 11.453}, {"name": "P2b", "t0": 11.453, "t1": 13.902}, {"name": "P3a", "t0": 13.902, "t1": 15.448}, {"name": "P3b", "t0": 15.448, "t1": 16.98}, {"name": "C1", "t0": 16.98, "t1": 19.401}, {"name": "C2", "t0": 19.401, "t1": 21.057}, {"name": "C3", "t0": 21.057, "t1": 22.465}, {"name": "C4a", "t0": 22.465, "t1": 24.75}, {"name": "C4b", "t0": 24.75, "t1": 26.344}, {"name": "C5a", "t0": 26.344, "t1": 28.502}, {"name": "C5b", "t0": 28.502, "t1": 30.149}, {"name": "T1", "t0": 30.149, "t1": 32.077}, {"name": "T2", "t0": 32.077, "t1": 33.968}, {"name": "T3a", "t0": 33.968, "t1": 35.062}, {"name": "T3b", "t0": 35.062, "t1": 36.275}, {"name": "T4", "t0": 36.275, "t1": 37.867}, {"name": "T5a", "t0": 37.867, "t1": 39.578}, {"name": "X3", "t0": 39.578, "t1": 42.1}, {"name": "X1", "t0": 42.1, "t1": 43.02}, {"name": "X2", "t0": 43.02, "t1": 44.167}, {"name": "Z1", "t0": 44.167, "t1": 45.674}, {"name": "M1", "t0": 45.674, "t1": 46.424}, {"name": "M2", "t0": 46.424, "t1": 47.174}, {"name": "M3", "t0": 47.174, "t1": 48.024}, {"name": "Z2", "t0": 48.024, "t1": 49.917}]
+SHOTS = [{"name": "H1", "t0": 0.0, "t1": 2.75}, {"name": "H2", "t0": 2.75, "t1": 4.151}, {"name": "H3", "t0": 4.151, "t1": 7.049}, {"name": "H4", "t0": 7.049, "t1": 8.001}, {"name": "P1", "t0": 8.001, "t1": 10.025}, {"name": "P2a", "t0": 10.025, "t1": 11.453}, {"name": "P2b", "t0": 11.453, "t1": 13.902}, {"name": "P3a", "t0": 13.902, "t1": 15.448}, {"name": "P3b", "t0": 15.448, "t1": 16.98}, {"name": "C1", "t0": 16.98, "t1": 19.401}, {"name": "C2", "t0": 19.401, "t1": 21.057}, {"name": "C3", "t0": 21.057, "t1": 22.465}, {"name": "C4a", "t0": 22.465, "t1": 24.75}, {"name": "C4b", "t0": 24.75, "t1": 26.344}, {"name": "C5a", "t0": 26.344, "t1": 28.502}, {"name": "C5b", "t0": 28.502, "t1": 30.149}, {"name": "T1", "t0": 30.149, "t1": 32.077}, {"name": "T2", "t0": 32.077, "t1": 33.968}, {"name": "T3a", "t0": 33.968, "t1": 35.062}, {"name": "T3b", "t0": 35.062, "t1": 36.275}, {"name": "T4", "t0": 36.275, "t1": 37.867}, {"name": "T5b", "t0": 37.867, "t1": 39.578}, {"name": "X3", "t0": 39.578, "t1": 42.1}, {"name": "X1", "t0": 42.1, "t1": 43.02}, {"name": "X2", "t0": 43.02, "t1": 44.167}, {"name": "Z1", "t0": 44.167, "t1": 45.674}, {"name": "M1", "t0": 45.674, "t1": 46.424}, {"name": "M2", "t0": 46.424, "t1": 47.174}, {"name": "M3", "t0": 47.174, "t1": 48.024}, {"name": "Z2", "t0": 48.024, "t1": 49.917}]
 END = 49.916666666666664
 # <<< CUES
 ORG = dict(B=(0, 6000, 0), R=(0, 6100, 0), L=(0, 6200, 0), F=(6000, 6000, 0), C=(6000, 0, 0), D=(-6000, 0, 0),
@@ -1046,11 +1046,12 @@ def set_hunting_anim(L):
 def hunt_amp(t):
     """Swing amplitude (m) over time: grows from T2, saturates at flange contact, decays once the dampers act (X1)."""
     t_grow = sh_t0('T2'); t_damp = sh_t0('X1')
+    a0 = 0.008 if CUT50 else 0.002                         # 50 s cut: swing readable from "left, right, left"
     if t < t_grow:
         a = 0.002
     else:
-        rate = math.log(0.0385 / 0.002) / max(1.0, EV['SLAM'] - t_grow) if CUT50 else 0.42
-        a = min(0.0385, 0.002 * math.exp(rate * (t - t_grow)))
+        rate = math.log(0.0385 / a0) / max(1.0, EV['SLAM'] - t_grow) if CUT50 else 0.42
+        a = min(0.0385, a0 * math.exp(rate * (t - t_grow)))
     if t > t_damp:
         a = max(0.002, a * math.exp(-1.6 * (t - t_damp)))
     return a
@@ -1243,6 +1244,8 @@ def update(t, sh, L):
         demo_pose('B', drift, tp, roll_dist=roll_d)
     for o in ANIM.get('marker', []):
         o.hide_render = not marker
+    for rg in B['rings'].values():                       # contact rings only once the cone story needs them
+        rg.hide_render = tp <= 0.0 or base in ('C1', 'C2')
     # ---- real demo R: flange contact / sideways slide
     rd = 0.0068
     if base == 'F3':
@@ -1288,7 +1291,7 @@ def update(t, sh, L):
         tt = t - (sD - s) / V_D
         dd = hunt_amp(tt) * math.sin(2 * math.pi * s / HUNT_L) if tt >= sh_t0('T2') else 0.0
         p, tg, r, up = D['path'].at(max(0.0, s))
-        q = p + r * dd * 16.0 + up * (RAIL_H + 0.03)
+        q = p + r * dd * (22.0 if CUT50 else 16.0) + up * (RAIL_H + 0.03)
         sp.points[i].co = (q.x, q.y, q.z, 1.0)
     D['trail'].hide_render = not (base.startswith('T') or base in ('X1', 'X2'))
     glow = 0.0
@@ -1340,6 +1343,8 @@ def camera_for(name, u, t):
         return p3 - r3 * (11 + 2 * u) + u3 * (8.5 + 3 * u), pa.at(sf - 190)[0] + u3 * 1.5, 30, 16
     if base == 'H4':
         bp = A['bogies'][0][0].matrix_world.translation
+        if CUT50:                                         # the approved teaser framing, short push-in
+            return lerp(p + tg * 3.3 - r * 3.2 + uu * 1.35, p + tg * 2.6 - r * 2.6 + uu * 1.05, eio(u)), p + uu * 0.62 - r * 0.2, 24, 8.0
         return lerp(p + tg * 5.5 - r * 4.0 + uu * 3.2, p + tg * 2.8 - r * 2.4 + uu * 1.1, eio(u)), lerp(bp, cp + uu * 0.45, eio(u)), 24, 8.0
     if base == 'P1':
         Lr = ANIM['lift']; c = Lr['lead'].matrix_world.translation; a = math.radians(-50 + 40 * u)
