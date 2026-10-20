@@ -37,13 +37,17 @@ jobs:
               if r:
                   bf = r.startswith("b"); s, e = map(int, r.lstrip("b").split("-")); segs.append((s, e, bf))
           total = sum(e - s + 1 for s, e, _ in segs); n = max(1, min(20, int(os.environ["CH"])))
-          size = -(-total // n); inc = []
+          size = -(-total // n)
+          while sum(-(-(e - s + 1) // size) for s, e, _ in segs) > 20:   # never drop a range: grow chunks until all fit
+              size += 1
+          assert len(segs) <= 20, "more than 20 ranges"
+          inc = []
           for s, e, bf in segs:                  # chunks never cross a segment boundary
               a = s
               while a <= e:
                   b = min(e, a + size - 1)
                   inc.append({"idx": len(inc), "range": f"{a}-{b}", "extra": "--before" if bf else ""}); a = b + 1
-          print("matrix=" + json.dumps({"include": inc[:20]}))
+          print("matrix=" + json.dumps({"include": inc}))
           PY
 
   render:
