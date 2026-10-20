@@ -415,6 +415,7 @@ def build_building(L):
     cyl('ShowerHead', (3.5, 0.45, 11.3), 0.17, 0.06, L['pipe'], bevel=0.02, verts=32)
     gauge('G3', (2.95, 0.45, 11.35), L, bar_at(11.3), boosted=2.0, stem=((3.5, 0.45, 11.45), (3.3, 0.45, 11.45)), label_side=-1)
     anchor('shower', (3.5, 0.45, 10.6)); anchor('showerEdge', (3.95, 0.45, 9.3))
+    anchor('showerHead', (3.5, 0.45, 11.3)); anchor('showerL', (3.2, 0.45, 10.5)); anchor('showerR', (3.8, 0.45, 10.5))   # head + upper spray
 
 
 # ---------------------------------------------------------------- pressure gauges (dial + animated needle)
@@ -610,6 +611,16 @@ def on_frame(scene, depsgraph=None):
 
 
 # ---------------------------------------------------------------- camera (eased keyframes per shot)
+OVERLAY_REFRAME = {
+    'M1': (1.5, 1.5, None),      # ground-floor gauge below the overlay zone
+    'M2': (1.3, 1.3, None),
+    'T2': (0.0, -0.85, 32),      # zoom out + tilt down: top-floor gauge and shower above the overlay zone
+    'T3': (-0.1, -0.1, None),    # spray clears the overlay zone; head stays in the upper third
+    'P3': (-0.2, -0.2, None),    # gauge face above the overlay zone
+}
+OVERLAY_PAN = {'P3': -0.14}       # pan left so the shower head leaves the frame edge
+
+
 def shot_poses():
     """Start/end pose per shot: (cam_start, cam_end, target_start, target_end, lens, fstop)."""
     Bc = Vector((B_BASE.x, B_BASE.y, B_BASE.z + B_H / 2)); V = lambda *a: Vector(a)
@@ -618,7 +629,7 @@ def shot_poses():
     JET_LAND = V(B_BASE.x - B_R - v_low * math.sqrt(2 * fall / G), B_BASE.y, ROOF_Z)
     SH_A = (V(3.04, -2.85, 11.0), V(3.08, 0.45, 10.45))     # top-floor shower framing (cold open = loop end)
     SH_B = (V(3.10, -2.55, 10.95), V(3.10, 0.45, 10.45))     # front view: the right wall's cut face stays out of shot
-    return {
+    P = {
         'C0': (SH_A[0], SH_B[0], SH_A[1], SH_B[1], 40, 4.0),
         'B1': (V(0.55, -3.9, 12.35), V(0.9, -3.0, 12.5), V(1.8, 0.0, 13.25), V(1.8, 0.0, 13.3), 32, 5.6),   # low-angle push-in on the roof tank
         'B2': dict(lens=45, fstop=3.2, way=[            # bottle ~35% of frame height → follow the jet down to its landing
@@ -641,6 +652,15 @@ def shot_poses():
         'P3': (V(3.75, -1.55, 11.55), V(3.6, -1.35, 11.45), V(2.95, 0.45, 11.35), V(2.95, 0.45, 11.35), 45, 3.5),
         'P4': (SH_B[0], SH_A[0], SH_B[1], SH_A[1], 40, 4.0),   # reverse of C0: ends exactly on the cold-open frame
     }
+    # Overlay rule: the text overlay sits at one fixed zone (centred, 70% height). Shots whose gauge reading or
+    # shower would fall in that zone are reframed here (small tilt/zoom).
+    #   name: (camera dz, target dz, lens or None)
+    for name, (dzc, dzt, lens) in OVERLAY_REFRAME.items():
+        p = P[name]
+        c0, c1, g0, g1, ln, fs = p
+        dx = OVERLAY_PAN.get(name, 0.0)
+        P[name] = (c0 + V(dx, 0, dzc), c1 + V(dx, 0, dzc), g0 + V(dx, 0, dzt), g1 + V(dx, 0, dzt), lens or ln, fs)
+    return P
 
 
 def ease_move(u):
