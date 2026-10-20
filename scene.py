@@ -1454,6 +1454,7 @@ def build_all(L):
     anchor('Btaper', SET['taper_label'])
     for side in (-1, 1):
         a_ = anchor(f'Bring{side:+d}', (side * RAIL_C, 0, R0 + 0.07)); a_.parent = SET['B']['ws']
+        a_ = anchor(f'Bcont{side:+d}', (side * RAIL_C, 0, -R0 + 0.16)); a_.parent = SET['B']['ws']   # for close-ups
     set_demo(L, origin=ORG['R'], taper=TAPER_REAL, drift=0.0068, xb=XB, key='R', section=True, rings=False, ticks=False)
     set_lift(L)
     set_topcurve(L)
