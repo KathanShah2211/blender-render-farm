@@ -1445,7 +1445,8 @@ def camera_for(name, u, t):
         e = eio(u)
         c0 = (p + tg * 3.6 - r * 3.4 + uu * 1.9) if CUT50 else (p + tg * 6.0 - r * 7.0 + uu * 4.0)   # shorter push: less smear
         c1 = p + tg * 1.75 - r * 1.45 + uu * 0.42
-        g0 = A['body'].matrix_world.translation; g1 = cp + up * 0.30 + r * 0.10
+        g1 = cp + up * 0.30 + r * 0.10
+        g0 = (cp + up * 0.55 + r * 0.10) if CUT50 else A['body'].matrix_world.translation   # dolly in on the wheel
         return lerp(c0, c1, e), lerp(g0, g1, e), lerp(30, 24, e), 4.0
     return Vector((0, -10, 5)), Vector((0, 0, 0)), 35, 8
 
