@@ -1421,7 +1421,12 @@ def camera_for(name, u, t):
                 return p + tg * 9.0 + r * 2.0 + uu * 5.2, p + tg * 2.0 - uu * 0.8, 24, 11
             return p - tg * 1.0 + r * 0.8 + uu * 8.5, p - tg * 7.0, 24, 16
         if base == 'T5':
-            sh = Vector((math.sin(t * 61) * 0.05, math.sin(t * 47) * 0.04, math.sin(t * 53) * 0.03)) * min(1.0, hunt_amp(t) / 0.03)
+            if CUT50:                                     # a decaying jolt on each flange slam (no frame-to-frame jitter)
+                k = max(0.0, t - EV['SLAM']); dt = k % (HUNT_L / V_D / 2) if t >= EV['SLAM'] else 9.0
+                j = math.exp(-dt / 0.12) * math.sin(2 * math.pi * 6.0 * dt)
+                sh = Vector((0.05 * j, 0.0, 0.035 * j))
+            else:
+                sh = Vector((math.sin(t * 61) * 0.05, math.sin(t * 47) * 0.04, math.sin(t * 53) * 0.03)) * min(1.0, hunt_amp(t) / 0.03)
             if var == 'a':
                 return p - tg * 2.0 - r * 1.6 + uu * 0.45 + sh, bpos - uu * 0.3, 24, 5
             return p + tg * 6.0 + r * 1.6 + uu * 3.5 + sh, bpos - uu * 0.9, 24, 8
@@ -1438,7 +1443,8 @@ def camera_for(name, u, t):
         return p + tg * 14 - r * 22 + uu * 9.0, A['body'].matrix_world.translation + uu * 1.0, 30, 16
     if base == 'Z2':
         e = eio(u)
-        c0 = p + tg * 6.0 - r * 7.0 + uu * 4.0; c1 = p + tg * 1.75 - r * 1.45 + uu * 0.42
+        c0 = (p + tg * 3.6 - r * 3.4 + uu * 1.9) if CUT50 else (p + tg * 6.0 - r * 7.0 + uu * 4.0)   # shorter push: less smear
+        c1 = p + tg * 1.75 - r * 1.45 + uu * 0.42
         g0 = A['body'].matrix_world.translation; g1 = cp + up * 0.30 + r * 0.10
         return lerp(c0, c1, e), lerp(g0, g1, e), lerp(30, 24, e), 4.0
     return Vector((0, -10, 5)), Vector((0, 0, 0)), 35, 8
@@ -1464,11 +1470,11 @@ def build_all(L):
     set_split(L)
     # sparks
     lw = lead_ws()
-    Sparks('HookSparks', lambda t: contact_point(lead_ws(), -1), L, n=130, speed=2.6, size=0.010)
+    Sparks('HookSparks', lambda t: contact_point(lead_ws(), -1), L, n=150, speed=2.6, size=0.016)   # approved hook density
     Rws = SET['R']['ws']
     Sparks('FlangeSparks', lambda t: (Rws.matrix_world @ Vector((XB + 0.030, 0.0, -R0 + 0.006)),
                                       -(Rws.matrix_world.to_3x3() @ Vector((0, 1, 0))), Vector((0, 0, 1))), L, n=140, speed=1.3, size=0.0035)
-    Sparks('HuntSparks', lambda t: contact_point(ANIM['D']['ws'][0], 1 if hunt_drift(t) > 0 else -1), L, n=70, speed=2.8, size=0.014)
+    Sparks('HuntSparks', lambda t: contact_point(ANIM['D']['ws'][0], 1 if hunt_drift(t) > 0 else -1), L, n=110, speed=3.0, size=0.02)
     SPARK_ON.update(HookSparks=('H1', 'H4', 'P5', 'F4', 'Z2'), FlangeSparks=('F2', 'F3'), HuntSparks=('T5',))
     bpy.app.handlers.frame_change_pre.clear(); bpy.app.handlers.frame_change_pre.append(frame_handler)
 
