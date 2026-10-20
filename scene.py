@@ -1,80 +1,30 @@
-"""Technical-cutaway scene: water pressure from a bottle to a building.
+"""Technical-cutaway scene kit: a broad-gauge wheelset, bogie and coach on curved / canted track, a turnout,
+and the effects used to explain how a train follows the rails.
 
 Usage (bpy module or blender -b -P):
-    python3 scene.py --frames 1-948 --res 720x1280 --samples 32 --out frames/
-    python3 scene.py --frames 133,397,505 --res 540x960 --samples 64 --out style/
-    python3 scene.py --frames 1-948 --res 270x480 --engine WORKBENCH --out animatic/
-    python3 scene.py --anchors anchors.json          # screen positions for post labels (no render)
+    python3 scene.py --style hook --res 540x960 --samples 48 --out style/
+    python3 scene.py --frames 1-2790 --res 720x1280 --samples 32 --out frames/   (once the shot list exists)
 
-Everything is built from primitives + modifiers. Shell cut faces get the orange hatch via boolean
-material transfer; water cross-sections keep their own material. Camera, pump, needles and
-stream growth use keyframes with eased Bezier F-curves. Free water (droplets, splashes,
-dribble wobble) is procedural in a frame-change handler, so it also evaluates at motion-blur
-sub-frames.
-
-Physics (see beat sheet): Torricelli jets v = sqrt(2 g d); tank sits on the roof slab, water
-surface at Z_SURF; gauge pressure ≈ depth below Z_SURF / 10.2 m per bar.
+Everything is built from primitives, revolved profiles and swept profiles. Real dimensions (metres):
+gauge 1.676, rail centres 1.750, wheel radius 0.4575, tread taper 1 in 20 (exaggerated in cutaways),
+rail inclination 1 in 20, sleeper spacing 0.60, cant up to 0.165.
 """
-import argparse, json, math, os, sys
-import bpy
-from mathutils import Vector
+import argparse, json, math, os, random, sys
+import bpy, bmesh
+from mathutils import Vector, Matrix
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import materials  # noqa: E402
 
 FPS = 24
-# >>> CUES (generated — numbers only)
-EV = {"HOLE_LOW_OPEN": 4.732, "HOLE_HIGH_OPEN": 7.636, "BOTTLE_CUT": 8.96, "NEEDLES": [16.627, 16.977, 17.327, 17.677], "PUMP_DROP": 26.3, "PUMP_SPIN": 27.785, "PUMP_LAND": 26.9, "BOOST_T": 29.205, "SHOWER_FULL": 29.805}
-SHOTS = [{"name": "C0", "t0": 0.0, "t1": 2.43}, {"name": "B1", "t0": 2.43, "t1": 4.06}, {"name": "B2", "t0": 4.06, "t1": 6.77}, {"name": "B3", "t0": 6.77, "t1": 8.96}, {"name": "B4", "t0": 8.96, "t1": 10.942}, {"name": "B5", "t0": 10.942, "t1": 12.57}, {"name": "M1", "t0": 12.57, "t1": 14.096}, {"name": "M2", "t0": 14.096, "t1": 15.24}, {"name": "G1", "t0": 15.24, "t1": 16.327}, {"name": "G2", "t0": 16.327, "t1": 18.62}, {"name": "G3", "t0": 18.62, "t1": 20.64}, {"name": "T1", "t0": 20.64, "t1": 23.017}, {"name": "T2", "t0": 23.017, "t1": 24.7}, {"name": "T3", "t0": 24.7, "t1": 26.15}, {"name": "P1", "t0": 26.15, "t1": 27.635}, {"name": "P2", "t0": 27.635, "t1": 28.955}, {"name": "P3", "t0": 28.955, "t1": 29.655}, {"name": "P4", "t0": 29.655, "t1": 31.88}]
-END = 31.88
-# <<< CUES
-T = dict(END=END)
-HOLE_LOW_OPEN, HOLE_HIGH_OPEN, BOTTLE_CUT = EV['HOLE_LOW_OPEN'], EV['HOLE_HIGH_OPEN'], EV['BOTTLE_CUT']
-NEEDLE_CUE = dict(zip(('G3', 'G2', 'G1', 'G0'), EV['NEEDLES']))      # top floor → ground floor
-PUMP_DROP, PUMP_LAND, PUMP_SPIN = EV['PUMP_DROP'], EV['PUMP_LAND'], EV['PUMP_SPIN']
-BOOST_T, SHOWER_FULL = EV['BOOST_T'], EV['SHOWER_FULL']
-if '--before' in sys.argv:              # BEFORE half of the end split: same shots, but the pump never boosts
-    BOOST_T = SHOWER_FULL = 1e6
 G = 9.81
-
-ROOF_Z = 12.125
-STAND_H, TANK_R, TANK_H = 0.4, 0.95, 1.5      # low steel stand, black poly tank
-Z_SURF = ROOF_Z + STAND_H + 1.35              # tank water surface ≈ 13.875
-OUTLET_Z = ROOF_Z + STAND_H + 0.14            # outlet near the tank base
-FLOOR_TOPS = [0.125, 3.125, 6.125, 9.125]
-
-
-def fr(sec):
-    return int(round(sec * FPS)) + 1
-
-
-def tsec(scene):
-    return (scene.frame_current + scene.frame_subframe - 1) / FPS
-
-
-def bar_at(z):
-    return max(0.0, (Z_SURF - z) / 10.2)
-
-
-# ---------------------------------------------------------------- args
-def parse_args():
-    argv = sys.argv[sys.argv.index('--') + 1:] if '--' in sys.argv else sys.argv[1:]
-    p = argparse.ArgumentParser()
-    p.add_argument('--frames', default='1-%d' % fr(T['END']))
-    p.add_argument('--res', default='720x1280')
-    p.add_argument('--samples', type=int, default=32)
-    p.add_argument('--engine', default='CYCLES', choices=['CYCLES', 'WORKBENCH'])
-    p.add_argument('--out', default='frames')
-    p.add_argument('--no-blur', action='store_true')
-    p.add_argument('--anchors', default=None)
-    p.add_argument('--before', action='store_true')
-    a = p.parse_args(argv)
-    if '-' in a.frames and ',' not in a.frames:
-        s, e = a.frames.split('-'); a.frame_list = list(range(int(s), int(e) + 1)); a.range = (int(s), int(e))
-    else:
-        a.frame_list = [int(x) for x in a.frames.split(',')]; a.range = None
-    a.w, a.h = (int(x) for x in a.res.lower().split('x'))
-    return a
+GAUGE = 1.676
+RAIL_C = 0.875            # half the distance between rail centres
+RAIL_H = 0.172            # rail height (base on sleeper top at z = 0)
+R0 = 0.4575               # nominal wheel rolling radius (915 mm new wheel)
+XB = 0.800                # wheel back face (half back-to-back distance)
+TAPER_REAL = 1 / 20
+OBJ = {}
 
 
 # ---------------------------------------------------------------- helpers
@@ -190,105 +140,394 @@ def anchor(name, loc):
     return o
 
 
-# ---------------------------------------------------------------- free water: tapered streams, droplets, splashes
-STREAMS = []
+def mesh_obj(name, bm, mat, smooth=False):
+    me = bpy.data.meshes.new(name); bm.to_mesh(me); bm.free()
+    o = bpy.data.objects.new(name, me); bpy.context.collection.objects.link(o)
+    if isinstance(mat, (list, tuple)):
+        for m in mat:
+            me.materials.append(m)
+    else:
+        me.materials.append(mat)
+    if smooth:
+        for p in me.polygons:
+            p.use_smooth = True
+    return o
 
 
-class Stream:
-    """A ballistic water stream: tapered translucent curve near the source that breaks into droplets,
-    plus an optional splash where it lands. Shape is recomputed per frame (wobble, growth)."""
+def empty(name, loc=(0, 0, 0)):
+    o = bpy.data.objects.new(name, None); bpy.context.collection.objects.link(o); o.location = loc
+    return o
 
-    def __init__(self, name, origin, vel, land_z, r0, mat, t_on, t_off=None, brk=0.6, n_drops=10,
-                 wobble=0.0, splash=True, cling=None, grow=0.35, splash_v=0.35, splash_n=6, splash_r=0.6, wet_r=0.0, wet_mat=None,
-                 layer=0):
-        self.splash_v, self.splash_r, self.wet_r, self.layer = splash_v, splash_r, wet_r, layer
-        self.name, self.o, self.v, self.land_z = name, Vector(origin), Vector(vel), land_z
-        self.r0, self.t_on, self.t_off, self.brk, self.wobble, self.cling, self.grow = r0, t_on, t_off, brk, wobble, cling, grow
-        # flight time to land_z (solve z0 + vz t - g t^2/2 = land_z)
-        a, b, c = -0.5 * G, self.v.z, self.o.z - land_z
-        self.t_end = (-b - math.sqrt(max(0.0, b * b - 4 * a * c))) / (2 * a) if cling is None else 0.6
-        cu = bpy.data.curves.new(name, 'CURVE'); cu.dimensions = '3D'; cu.bevel_depth = r0; cu.bevel_resolution = 4
-        cu.use_fill_caps = True
-        self.N = 24
-        sp = cu.splines.new('POLY'); sp.points.add(self.N - 1)
-        self.obj = bpy.data.objects.new(name, cu); bpy.context.collection.objects.link(self.obj); cu.materials.append(mat)
-        self.drops = []
-        for i in range(n_drops):
-            d = sphere(f'{name}_d{i}', origin, 1.0, mat, seg=12); self.drops.append(d)
-        self.spl = []
-        if splash:
-            for i in range(splash_n):
-                self.spl.append(sphere(f'{name}_s{i}', origin, 1.0, mat, seg=8))
-        self.ring = None
-        if splash and wet_r > 0:   # soft shiny wet patch that spreads (radial alpha falloff, no outline)
-            bpy.ops.mesh.primitive_circle_add(vertices=40, radius=1.0, fill_type='NGON', location=origin)
-            self.ring = bpy.context.object; self.ring.name = f'{name}_wet'; self.ring.data.materials.append(wet_mat)
-        self.splash = splash
-        STREAMS.append(self)
 
-    def pos(self, tau, t, wob=True):
-        if self.cling is not None:          # weak dribble clinging to a surface: slides straight down it
-            x0, y0, zbot = self.cling
-            z = self.o.z - (self.o.z - zbot) * min(1.0, tau / self.t_end)
-            w = self.wobble * math.sin(9 * tau + 3.1 * t) * min(1.0, tau / self.t_end) if wob else 0
-            return Vector((x0 + w * 0.3, y0 + w, z))
-        p = self.o + self.v * tau + Vector((0, 0, -0.5 * G * tau * tau))
-        if wob and self.wobble:
-            k = tau / self.t_end
-            p += Vector((math.sin(11 * tau + 4 * t) * self.wobble * k, math.cos(7 * tau + 3 * t) * self.wobble * k, 0))
-        return p
+def parent(child, par):
+    child.parent = par; child.matrix_parent_inverse = par.matrix_world.inverted()
+
+
+# ---------------------------------------------------------------- track path (centreline) with curvature and cant
+class Path:
+    """Centreline sampled every ds metres from segments: ('straight', L) or ('arc', R, degrees, +1 left / -1 right).
+    at(s) → (point, tangent, right, up) with the cross-section rolled by the cant at s (outer rail raised)."""
+
+    def __init__(self, segments, origin=(0, 0, 0), heading_deg=90.0, ds=0.25, cant=0.0):
+        self.ds = ds; self.pts = []; self.turn = []
+        p = Vector(origin); h = math.radians(heading_deg)
+        self.pts.append((p.copy(), h)); self.turn.append(0)
+        for seg in segments:
+            if seg[0] == 'straight':
+                n = max(1, int(round(seg[1] / ds)))
+                for _ in range(n):
+                    p = p + Vector((math.cos(h), math.sin(h), 0)) * ds; self.pts.append((p.copy(), h)); self.turn.append(0)
+            else:
+                _, R, deg, d = seg
+                n = max(1, int(round(R * math.radians(deg) / ds)))
+                for _ in range(n):
+                    h2 = h + d * ds / R
+                    hm = (h + h2) / 2
+                    p = p + Vector((math.cos(hm), math.sin(hm), 0)) * ds; h = h2
+                    self.pts.append((p.copy(), h)); self.turn.append(d)
+        self.length = (len(self.pts) - 1) * ds
+        self.cant = cant           # metres of cant on curved parts (with a short linear ramp)
+
+    def cant_at(self, i):
+        if not self.cant:
+            return 0.0
+        k = int(6 / self.ds)       # 6 m ramp
+        lo, hi = max(0, i - k), min(len(self.turn) - 1, i + k)
+        turns = self.turn[lo:hi + 1]
+        d = sum(turns) / max(1, len(turns))
+        return self.cant * d       # signed: +left turn → right (outer) rail up
+
+    def at(self, s):
+        s = max(0.0, min(self.length, s)); f = s / self.ds; i = int(f); u = f - i
+        j = min(i + 1, len(self.pts) - 1)
+        p = self.pts[i][0].lerp(self.pts[j][0], u); h = self.pts[i][1] * (1 - u) + self.pts[j][1] * u
+        t = Vector((math.cos(h), math.sin(h), 0)); right = Vector((math.sin(h), -math.cos(h), 0)); up = Vector((0, 0, 1))
+        c = self.cant_at(i) * (1 - u) + self.cant_at(j) * u
+        a = math.atan2(c, 2 * RAIL_C)
+        right_r = right * math.cos(a) + up * math.sin(a); up_r = up * math.cos(a) - right * math.sin(a)
+        return p, t, right_r, up_r
+
+
+def sweep(name, frames, profile, mat, cap=True, smooth=False):
+    """Sweep a closed 2D profile [(u, v)] along frames [(origin, right, up)]."""
+    bm = bmesh.new(); rings = []
+    for o, r, up in frames:
+        rings.append([bm.verts.new(o + r * u + up * v) for u, v in profile])
+    n = len(profile)
+    for a, b in zip(rings, rings[1:]):
+        for k in range(n):
+            bm.faces.new((a[k], a[(k + 1) % n], b[(k + 1) % n], b[k]))
+    if cap:
+        bm.faces.new(list(reversed(rings[0]))); bm.faces.new(rings[-1])
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    return mesh_obj(name, bm, mat, smooth)
+
+
+def incline(profile, side):
+    """Rails lean inward 1 in 20: rotate about the rail-base centre toward the track centre, then shift the rail
+    outward by RAIL_H/20 so the head (where gauge is measured) stays centred on RAIL_C."""
+    a = -side * math.atan(1 / 20); sh = side * RAIL_H / 20
+    return [(u * math.cos(a) - v * math.sin(a) + sh, u * math.sin(a) + v * math.cos(a)) for u, v in profile]
+
+
+RAIL_FOOT = [(-0.075, 0.0), (0.075, 0.0), (0.075, 0.011), (0.013, 0.034), (0.0085, 0.128), (-0.0085, 0.128), (-0.013, 0.034), (-0.075, 0.011)]
+RAIL_HEAD = [(-0.0095, 0.1282), (0.0095, 0.1282), (0.036, 0.132), (0.0365, 0.160), (0.031, 0.1695), (0.016, 0.172), (-0.016, 0.172), (-0.031, 0.1695), (-0.0365, 0.160), (-0.036, 0.132)]
+
+
+def rail_frames(path, s0, s1, offset, step=0.25):
+    fr = []; s = s0
+    while s <= s1 + 1e-6:
+        p, t, r, up = path.at(s); fr.append((p + r * offset, r, up)); s += step
+    return fr
+
+
+RAIL_FULL = [(-0.075, 0.0), (0.075, 0.0), (0.075, 0.011), (0.013, 0.034), (0.0085, 0.124), (0.036, 0.132), (0.0365, 0.160),
+             (0.031, 0.1695), (0.016, 0.172), (-0.016, 0.172), (-0.031, 0.1695), (-0.0365, 0.160), (-0.036, 0.132), (-0.0085, 0.124),
+             (-0.013, 0.034), (-0.075, 0.011)]
+
+
+def build_rail(name, frames, side, L, head_mat=None):
+    """Rail body (web/foot material) + a thin running-surface skin on the head, so a section shows one solid shape."""
+    a = sweep(name + 'Foot', frames, incline(RAIL_FULL, side), L['rail'])
+    skin = [(-0.033, 0.158), (-0.0305, 0.1688), (-0.016, 0.1714), (0.016, 0.1714), (0.0305, 0.1688), (0.033, 0.158),
+            (0.0368, 0.1600), (0.0313, 0.1700), (0.016, 0.1726), (-0.016, 0.1726), (-0.0313, 0.1700), (-0.0368, 0.1600)]
+    b = sweep(name + 'Head', frames, incline(skin, side), head_mat or L['railHead'], smooth=False)
+    return a, b
+
+
+def build_track(name, path, s0, s1, L, sleepers=True, ballast=True):
+    objs = []
+    for side in (-1, 1):
+        objs += build_rail(f'{name}Rail{"L" if side < 0 else "R"}', rail_frames(path, s0, s1, side * RAIL_C), side, L)
+    if sleepers:
+        bm = bmesh.new(); s = s0 + 0.3
+        while s < s1:
+            p, t, r, up = path.at(s)
+            corners = []
+            for u in (-1.375, 1.375):
+                for w in (-0.125, 0.125):
+                    for v in (-0.21, 0.0):
+                        corners.append(p + r * u + t * w + up * v)
+            vs = [bm.verts.new(c) for c in corners]
+            # corners index: u(-/+) w(-/+) v(-/+) → 8 verts
+            idx = lambda iu, iw, iv: vs[iu * 4 + iw * 2 + iv]
+            for f in ([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)], [(0, 0, 1), (0, 1, 1), (1, 1, 1), (1, 0, 1)],
+                      [(0, 0, 0), (0, 0, 1), (1, 0, 1), (1, 0, 0)], [(0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1)],
+                      [(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)], [(1, 0, 0), (1, 0, 1), (1, 1, 1), (1, 1, 0)]):
+                bm.faces.new([idx(*c) for c in f])
+            s += 0.6
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+        o = mesh_obj(name + 'Sleepers', bm, L['sleeper']); bv = o.modifiers.new('Bevel', 'BEVEL'); bv.width = 0.015; bv.segments = 2
+        objs.append(o)
+    if ballast:
+        prof = [(-3.3, -0.62), (3.3, -0.62), (1.95, -0.05), (-1.95, -0.05)]
+        objs.append(sweep(name + 'Ballast', rail_frames(path, s0, s1, 0.0, step=0.5), prof, L['ballast']))
+    return objs
+
+
+# ---------------------------------------------------------------- wheelset (revolved conical tread + flange)
+def tread_r(x, taper):
+    """Rolling radius at distance |x| from the wheelset centre (tape circle at the rail centre)."""
+    return R0 - (abs(x) - RAIL_C) * taper
+
+
+def wheel_profile(taper, side=1, full=True, xb=XB):
+    """(x, r) closed profile of one wheel in wheelset coordinates (x along the axle, + = right).
+    full=True: one piece — hub, web and rim — so a section cut is a single clean face."""
+    rr = lambda x: tread_r(x, taper)
+    XB = xb                                             # demo wheels may move the flange inward for more play
+    ft, fh = 0.032, 0.028
+    root = rr(XB + ft + 0.010)
+    rim_in = R0 - 0.075
+    tread = []
+    x = XB + ft + 0.022
+    while x < 0.930:
+        tread.append((x, rr(x))); x += 0.012
+    flange = [(XB + ft + 0.010, root), (XB + ft, root + fh * 0.55), (XB + ft - 0.009, root + fh), (XB + 0.006, root + fh), (XB, root + fh - 0.006)]
+    if full:
+        pts = [(0.760, 0.086), (0.900, 0.086), (0.900, 0.130), (0.875, 0.145), (0.875, rim_in), (0.935, rim_in),
+               (0.935, rr(0.935) - 0.004)] + list(reversed(tread)) + flange + [(XB, rim_in), (min(0.835, XB + 0.035), rim_in),
+               (min(0.835, XB + 0.035), 0.145), (0.760, 0.130)]
+    else:
+        pts = [(XB, rim_in)] + list(reversed(flange)) + tread + [(0.935, rr(0.935) - 0.004), (0.935, rim_in)]
+    return [(side * x, r) for x, r in pts] if side > 0 else [(side * x, r) for x, r in reversed(pts)]
+
+
+def revolve(name, prof, mat, seg=96, morph=None):
+    """Revolve a closed (x, r) profile about X. morph = second profile with the same point count → shape key 'Morph'."""
+    bm = bmesh.new(); rings = []
+    for k in range(seg):
+        a = 2 * math.pi * (k + 0.37) / seg; c, s = math.cos(a), math.sin(a)   # no vertex on the section plane
+        rings.append([bm.verts.new((x, r * c, r * s)) for x, r in prof])
+    n = len(prof)
+    for k in range(seg):
+        A, B = rings[k], rings[(k + 1) % seg]
+        for i in range(n):
+            bm.faces.new((A[i], A[(i + 1) % n], B[(i + 1) % n], B[i]))
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    if bm.calc_volume(signed=True) < 0:            # make sure the solid points outward (clean boolean sections)
+        bmesh.ops.reverse_faces(bm, faces=bm.faces)
+    o = mesh_obj(name, bm, mat, smooth=True)
+    if morph is not None:
+        o.shape_key_add(name='Basis'); sk = o.shape_key_add(name='Morph'); n = len(prof)
+        for k in range(seg):
+            a = 2 * math.pi * (k + 0.37) / seg; c, s_ = math.cos(a), math.sin(a)
+            for i, (x, r) in enumerate(morph):
+                sk.data[k * n + i].co = (x, r * c, r * s_)
+    return o
+
+
+def xcyl(name, x0, x1, r, mat, verts=48):
+    """Cylinder along the local X axis (the axle direction)."""
+    return cyl(name, ((x0 + x1) / 2, 0, 0), r, abs(x1 - x0), mat, rot=(0, math.radians(90), 0), verts=verts, bevel=0.004)
+
+
+def build_wheelset(name, L, taper=TAPER_REAL, discs=True, ticks=False, morph_taper=None, xb=XB):
+    """Root empty at the axle centre (wheel-centre height). Child 'spin' rotates about X as the wheels roll.
+    morph_taper: adds a 'Morph' shape key to each wheel (e.g. cylinder → cone, steep → shallow cone)."""
+    root = empty(name); spin = empty(name + 'Spin'); spin.parent = root
+    parts = []
+    for side in (-1, 1):
+        mp = wheel_profile(morph_taper, side, xb=xb) if morph_taper is not None else None
+        rim = revolve(f'{name}Rim{side:+d}', wheel_profile(taper, side, xb=xb), L['tread'], morph=mp)
+        parts += [rim]
+        if ticks:
+            parts.append(box(f'{name}Tick{side:+d}', (side * 0.93 - 0.006, -0.02, R0 - 0.20), (side * 0.93 + 0.006, 0.02, R0 - 0.08), L['glowO'], bevel=0.003))
+    parts.append(xcyl(name + 'Axle', -1.08, 1.08, 0.085, L['axle']))
+    if discs:
+        for side in (-1, 1):
+            parts.append(xcyl(f'{name}Disc{side:+d}', side * 0.30, side * 0.37, 0.32, L['axle']))
+    for p in parts:
+        p.parent = spin
+    OBJ.setdefault('wheelsets', []).append(root)
+    root['taper'] = taper
+    return root
+
+
+def place_on_track(obj, path, s, drift=0.0, yaw=0.0, lift=0.0):
+    """Put a wheelset/bogie root on the track at arc length s: drift = sideways shift (m, + right), yaw (rad)."""
+    p, t, r, up = path.at(s)
+    ca, sa = math.cos(yaw), math.sin(yaw)
+    r2 = r * ca + t * sa; t2 = t * ca - r * sa
+    m = Matrix((r2, t2, up)).transposed()
+    obj.matrix_world = Matrix.Translation(p + r * drift + up * (RAIL_H + R0 + lift)) @ m.to_4x4()
+
+
+def spin_of(ws):
+    return bpy.data.objects[ws.name + 'Spin']
+
+
+def roll(ws, distance):
+    spin_of(ws).rotation_euler = (-distance / R0, 0, 0)
+
+
+# ---------------------------------------------------------------- bogie (LHB-style, simplified) + coach
+def build_bogie(name, L, taper=TAPER_REAL, damper=True):
+    root = empty(name)
+    wsets = []
+    for k, y in enumerate((1.28, -1.28)):
+        ws = build_wheelset(f'{name}WS{k}', L, taper); ws.location = (0, y, 0); ws.parent = root; wsets.append(ws)
+    fr = []
+    for side in (-1, 1):
+        x = side * 1.02
+        fr.append(box(f'{name}Side{side:+d}', (x - 0.09, -2.0, 0.08), (x + 0.09, 2.0, 0.34), L['bogie'], bevel=0.03))
+        for y in (1.28, -1.28):
+            fr.append(box(f'{name}AxBox{side:+d}{y:+.0f}', (x - 0.12, y - 0.17, -0.12), (x + 0.12, y + 0.17, 0.12), L['bogie'], bevel=0.02))
+            fr.append(spring(f'{name}Spr{side:+d}{y:+.0f}', (x, y - 0.0, 0.12), 0.09, 0.2, L['spring']))
+        fr.append(spring(f'{name}Sec{side:+d}', (x, 0.0, 0.34), 0.16, 0.42, L['spring'], turns=5))
+        if damper:
+            d1 = cyl(f'{name}Damper{side:+d}', (side * 1.38, 0.55, 0.62), 0.055, 0.75, L['damper'], rot=(math.radians(90), 0, 0), bevel=0.01)
+            d2 = cyl(f'{name}DamperRod{side:+d}', (side * 1.38, 1.05, 0.62), 0.022, 0.35, L['axle'], rot=(math.radians(90), 0, 0), bevel=0)
+            fr += [d1, d2]; OBJ.setdefault('dampers', []).extend([d1, d2])
+    fr.append(box(name + 'Transom', (-1.0, -0.22, 0.12), (1.0, 0.22, 0.30), L['bogie'], bevel=0.03))
+    for o in fr:
+        o.parent = root
+    root['wheelsets'] = [w.name for w in wsets]
+    return root, wsets
+
+
+def spring(name, base, r, h, mat, turns=4):
+    """Coil spring: a helix curve with a round bevel."""
+    cu = bpy.data.curves.new(name, 'CURVE'); cu.dimensions = '3D'; cu.bevel_depth = r * 0.16; cu.bevel_resolution = 3
+    sp = cu.splines.new('POLY'); n = turns * 16; sp.points.add(n)
+    for i in range(n + 1):
+        a = 2 * math.pi * i / 16
+        sp.points[i].co = (base[0] + r * math.cos(a), base[1] + r * math.sin(a), base[2] + h * i / n, 1)
+    o = bpy.data.objects.new(name, cu); bpy.context.collection.objects.link(o); cu.materials.append(mat)
+    return o
+
+
+COACH_L, COACH_W, BOGIE_C = 23.54, 3.24, 7.45
+
+
+def build_coach_body(name, L, livery='coach'):
+    """Body only, origin at track centre / wheel-centre height under the coach centre.
+    coach: LHB stainless shell, red window band + cream stripe, wide tinted windows, end doors, AC roof units,
+    black gangway bellows.  loco: WAP-7-style electric loco — red/cream body, flat cab fronts with two windscreens,
+    headlight, two pantographs on the roof."""
+    root = empty(name); parts = []
+    z0, z1 = 0.80, 3.55
+    if livery == 'loco':
+        Lb = 20.4
+        parts.append(box(name + 'Body', (-COACH_W / 2 + 0.05, -Lb / 2, z0), (COACH_W / 2 - 0.05, Lb / 2, z1 - 0.15), L['loco'], bevel=0.14, segs=3))
+        for side in (-1, 1):
+            x = side * (COACH_W / 2 - 0.04)
+            parts.append(box(f'{name}Cream{side:+d}', (x - 0.012, -Lb / 2 + 0.2, 1.05), (x + 0.012, Lb / 2 - 0.2, 1.45), L['cream'], bevel=0))
+            for k, y in enumerate((-6.5, -2.0, 2.0, 6.5)):
+                parts.append(box(f'{name}Louvre{side:+d}{k}', (x - 0.014, y - 1.2, 2.05), (x + 0.014, y + 1.2, 2.65), L['bogie'], bevel=0.01))
+        for end in (-1, 1):
+            y = end * (Lb / 2 + 0.01)
+            parts.append(box(f'{name}Face{end:+d}', (-COACH_W / 2 + 0.15, y - 0.03, 1.05), (COACH_W / 2 - 0.15, y + 0.03, 1.55), L['cream'], bevel=0.01))
+            for xw in (-0.72, 0.72):
+                parts.append(box(f'{name}Wind{end:+d}{xw:+.1f}', (xw - 0.6, y - 0.035, 2.15), (xw + 0.6, y + 0.035, 2.95), L['window'], bevel=0.03))
+            parts.append(cyl(f'{name}Lamp{end:+d}', (0, y, 3.15), 0.13, 0.08, L['glowB'], rot=(math.radians(90), 0, 0), bevel=0))
+            parts.append(box(f'{name}Buffer{end:+d}', (-0.3, y - 0.25 * end, 0.45), (0.3, y + 0.25 * end, 0.75), L['buffer'], bevel=0.03))
+            # pantograph: base + two diamond arms + collector bar
+            yp = end * 5.5
+            parts.append(box(f'{name}PBase{end:+d}', (-0.6, yp - 0.6, z1 - 0.15), (0.6, yp + 0.6, z1 - 0.05), L['pantograph'], bevel=0.02))
+            for dy in (-0.45, 0.45):
+                parts.append(pipe(f'{name}PArm{end:+d}{dy:+.2f}', (0, yp + dy, z1 - 0.05), (0, yp, z1 + 0.75), 0.025, L['pantograph']))
+            parts.append(box(f'{name}PBar{end:+d}', (-0.9, yp - 0.05, z1 + 0.73), (0.9, yp + 0.05, z1 + 0.8), L['pantograph'], bevel=0.01))
+    else:
+        parts.append(box(name + 'Body', (-COACH_W / 2, -COACH_L / 2, z0), (COACH_W / 2, COACH_L / 2, z1), L['shell'], bevel=0.12, segs=3))
+        roof = cyl(name + 'Roof', (0, 0, z1 - 0.05), COACH_W / 2 - 0.02, COACH_L - 0.3, L['roof'], rot=(math.radians(90), 0, 0), verts=40, bevel=0)
+        roof.scale = (1, 0.22, 1); parts.append(roof)
+        for y in (-COACH_L / 2 + 2.2, COACH_L / 2 - 2.2):
+            parts.append(box(f'{name}AC{y:+.0f}', (-0.9, y - 1.1, z1 + 0.15), (0.9, y + 1.1, z1 + 0.5), L['acunit'], bevel=0.06))
+        for side in (-1, 1):
+            x = side * (COACH_W / 2 + 0.005)
+            parts.append(box(f'{name}Band{side:+d}', (x - 0.012, -COACH_L / 2 + 1.2, 1.9), (x + 0.012, COACH_L / 2 - 1.2, 2.85), L['loco'], bevel=0))
+            parts.append(box(f'{name}Stripe2{side:+d}', (x - 0.013, -COACH_L / 2 + 1.2, 1.72), (x + 0.013, COACH_L / 2 - 1.2, 1.82), L['cream'], bevel=0))
+            for k in range(8):
+                y = -COACH_L / 2 + 3.4 + k * 2.4
+                parts.append(box(f'{name}Win{side:+d}{k}', (x - 0.016, y - 0.85, 2.02), (x + 0.016, y + 0.85, 2.72), L['window'], bevel=0.03))
+            for y in (-COACH_L / 2 + 1.0, COACH_L / 2 - 1.0):
+                parts.append(box(f'{name}Door{side:+d}{y:+.0f}', (x - 0.016, y - 0.4, 1.0), (x + 0.016, y + 0.4, 3.0), L['stripe'], bevel=0.02))
+        for end in (-1, 1):
+            y = end * (COACH_L / 2 + 0.25)
+            parts.append(box(f'{name}Bellows{end:+d}', (-0.75, y - 0.25, 1.0), (0.75, y + 0.25, 3.1), L['buffer'], bevel=0.05))
+    for p in parts:
+        p.parent = root
+    return root
+
+
+# ---------------------------------------------------------------- effects
+SPARKS = []
+
+
+class Sparks:
+    """Hot sparks thrown from a contact point (callable returning (point, forward, up))."""
+
+    def __init__(self, name, where, L, n=40, rate=1.0, t_on=-1e9, t_off=1e9, speed=2.5, size=0.006):
+        self.name = name
+        self.where, self.t_on, self.t_off, self.speed, self.size, self.rate = where, t_on, t_off, speed, size, rate
+        rnd = random.Random(hash(name) & 0xffff)
+        self.p = []
+        for i in range(n):
+            d = sphere(f'{name}_{i}', (0, 0, 0), 1.0, L['spark'], seg=6)
+            d.visible_shadow = False
+            self.p.append((d, rnd.random(), rnd.uniform(-1, 1), rnd.uniform(0.3, 1.0), rnd.uniform(0.6, 1.2)))
+        SPARKS.append(self)
 
     def update(self, t):
-        on = t >= self.t_on and (self.t_off is None or t < self.t_off)
-        g = min(1.0, max(0.0, (t - self.t_on) / self.grow)) if on else 0.0
-        g = 1 - (1 - g) ** 3                                       # ease-out growth
-        cu = self.obj.data; sp = cu.splines[0]
-        tb = self.t_end * self.brk * g
-        for i, p in enumerate(sp.points):
-            u = i / (self.N - 1); tau = tb * u
-            q = self.pos(tau, t)
-            p.co = (q.x, q.y, q.z, 1.0)
-            ripple = 1.0 + 0.18 * math.sin(38 * u - 14 * t) * u              # surface ripples grow toward the break
-            p.radius = max(0.05, (1.0 - 0.7 * u) * ripple) * (1.0 if on else 0.0)  # taper: thick at source, thin at the break
-        self.obj.hide_render = not on or g < 0.02
-        # droplets beyond the break point, flowing along the arc
-        n = len(self.drops)
-        for i, d in enumerate(self.drops):
-            ph = ((t - self.t_on) * 1.3 + i / n) % 1.0
-            tau = self.t_end * (self.brk + (1 - self.brk) * ph)
-            q = self.pos(tau, t)
-            d.location = q
-            vis = on and g >= 1.0 and t - self.t_on > 0.15
-            r = self.r0 * (0.75 - 0.35 * ph) * (0.6 + 0.8 * ((i * 37) % 10) / 10)
-            vel = (self.pos(tau + 0.01, t, False) - self.pos(tau, t, False))
-            d.rotation_mode = 'QUATERNION'; d.rotation_quaternion = vel.to_track_quat('Z', 'Y') if vel.length > 1e-6 else (1, 0, 0, 0)
-            s = r if vis else 0.0
-            d.scale = (s, s, s * 1.8)                              # slightly elongated along motion
-        # splash at the landing point
-        if self.splash:
-            land = self.pos(self.t_end, t, False)
-            lv = on and g >= 1.0
-            n = len(self.spl)
-            for i, s in enumerate(self.spl):              # crown: droplets thrown up and out in a ring on impact
-                ph = ((t - self.t_on) * 2.6 + i * 0.618) % 1.0
-                a = i / max(1, n) * 2 * math.pi + 0.37 * math.sin(i * 1.7)
-                sp_v = self.splash_v * (0.75 + 0.5 * ((i * 53) % 10) / 10)
-                tt = ph * 0.26
-                h = sp_v * 1.6 * tt - 0.5 * G * tt * tt
-                rr0 = self.r0 * 1.2
-                s.location = (land.x + math.cos(a) * (rr0 + sp_v * 0.7 * tt), land.y + math.sin(a) * (rr0 + sp_v * 0.7 * tt),
-                              self.land_z + max(0.0, h) + 0.002)
-                rr = self.r0 * self.splash_r * (1 - 0.55 * ph) if lv and h > -0.01 else 0.0
-                s.scale = (rr, rr, rr * 1.4)
-            if self.ring is not None:
-                grow = min(1.0, max(0.0, (t - self.t_on - 0.1) / 1.6))
-                rs = self.wet_r * (0.25 + 0.75 * (1 - (1 - grow) ** 2)) if lv else 0.0
-                self.ring.location = (land.x, land.y, self.land_z + 0.0012 + 0.0004 * self.layer)
-                self.ring.scale = (rs, rs * 0.92, 1.0)
-                self.ring.hide_render = not lv
+        on = self.t_on <= t < self.t_off
+        if t > END / 2:                                   # phase measured from the loop point → frame N joins frame 1
+            t = t - END
+        o, fwd, up = self.where(t)
+        side = fwd.cross(up)
+        for d, ph, sx, sz, sv in self.p:
+            life = 0.35 * sv
+            a = ((t * self.rate / life) + ph) % 1.0; tau = a * life
+            v = (-fwd * 0.9 + side * sx * 0.5 + up * sz) * self.speed * sv
+            pos = o + v * tau + Vector((0, 0, -0.5 * G * tau * tau))
+            d.location = pos
+            vel = v + Vector((0, 0, -G * tau))
+            d.rotation_mode = 'QUATERNION'; d.rotation_quaternion = vel.to_track_quat('Z', 'Y')
+            s = self.size * (1 - a) if on else 0.0
+            d.scale = (s, s, s * 6)
 
 
-# ---------------------------------------------------------------- world, lights, ground
+def ring(name, mat, r=1.0, minor=0.012):
+    bpy.ops.mesh.primitive_torus_add(major_radius=r, minor_radius=minor, major_segments=96, minor_segments=8)
+    o = bpy.context.object; o.name = name; o.data.materials.append(mat); return o
+
+
+def tube_curve(name, pts, r, mat):
+    cu = bpy.data.curves.new(name, 'CURVE'); cu.dimensions = '3D'; cu.bevel_depth = r; cu.bevel_resolution = 3
+    sp = cu.splines.new('POLY'); sp.points.add(len(pts) - 1)
+    for i, p in enumerate(pts):
+        sp.points[i].co = (p[0], p[1], p[2], 1)
+    o = bpy.data.objects.new(name, cu); bpy.context.collection.objects.link(o); cu.materials.append(mat)
+    return o
+
+
+def on_frame(scene, depsgraph=None):
+    t = (scene.frame_current + scene.frame_subframe - 1) / FPS
+    for s in SPARKS:
+        s.update(t)
+
+
+# ---------------------------------------------------------------- world
 def build_world(L):
     sc = bpy.context.scene
     w = bpy.data.worlds.new('Sky'); sc.world = w; w.use_nodes = True
@@ -301,408 +540,242 @@ def build_world(L):
     ramp.color_ramp.elements[0].color = (0.86, 0.78, 0.64, 1); ramp.color_ramp.elements[1].color = (0.24, 0.47, 0.78, 1)
     nt.links.new(ramp.outputs['Color'], bg.inputs['Color'])
     bpy.ops.object.light_add(type='SUN', location=(0, 0, 30)); sun = bpy.context.object; sun.name = 'Sun'
-    sun.data.energy = 6.5; sun.data.color = (1.0, 0.80, 0.60); sun.data.angle = math.radians(3)
-    sun.rotation_euler = (math.radians(70), 0, math.radians(-42))
-    bpy.ops.mesh.primitive_plane_add(size=400, location=(0, 0, -0.125)); g = bpy.context.object; g.name = 'Ground'
-    m = L['sand'].copy(); m.name = 'SandHaze'; g.data.materials.append(m)
-    nt = m.node_tree; bsdf = nt.nodes.get('Principled BSDF')
-    cam = nt.nodes.new('ShaderNodeCameraData'); mr = nt.nodes.new('ShaderNodeMapRange')
-    mr.inputs['From Min'].default_value = 25; mr.inputs['From Max'].default_value = 140
-    mix = nt.nodes.new('ShaderNodeMix'); mix.data_type = 'RGBA'
-    src = bsdf.inputs['Base Color'].links[0].from_socket
-    nt.links.new(cam.outputs['View Distance'], mr.inputs['Value']); nt.links.new(mr.outputs['Result'], mix.inputs['Factor'])
-    nt.links.new(src, mix.inputs['A']); mix.inputs['B'].default_value = (0.86, 0.78, 0.64, 1)
-    nt.links.new(mix.outputs['Result'], bsdf.inputs['Base Color'])
+    sun.data.energy = 5.5; sun.data.color = (1.0, 0.82, 0.62); sun.data.angle = math.radians(3)
+    sun.rotation_euler = (math.radians(58), 0, math.radians(-35))
+    bpy.ops.mesh.primitive_plane_add(size=20000, location=(0, 0, -0.62)); g = bpy.context.object; g.name = 'Ground'   # covers every set (up to 6 km out)
+    g.data.materials.append(L['sand'])
 
 
-# ---------------------------------------------------------------- building, tank, pipes
-TANK_X = 1.8
-OBJ = {}
+# ---------------------------------------------------------------- sets (each lives in its own patch of the world)
+SET = {}
 
 
-def build_building(L):
-    bc = cutter('BuildingCut', (-0.7, -6, 0.2), (7, 0.0, 17), L['hatch'])   # removes front-right (y<0, x>-0.7)
-    box('Partition', (-0.8, -2.75, -0.125), (-0.6, 2.75, 12.9), L['wall'], bevel=0.02)   # hides the cut boundary
-    OBJ['bc'] = bc
-    parts = []
-    for i, z in enumerate([0, 3, 6, 9, 12]):
-        parts.append(box(f'Slab{i}', (-3.75, -2.75, z - 0.125), (3.75, 2.75, z + 0.125), L['slab'], bevel=0.03))
-    parts.append(box('WallBack', (-4, 2.75, -0.125), (4, 3.0, 12.9), L['wall'], bevel=0.04))
-    parts.append(box('WallLeft', (-4, -2.75, -0.125), (-3.75, 2.75, 12.9), L['wall'], bevel=0.04))
-    parts.append(box('WallRight', (3.75, -2.75, -0.125), (4, 2.75, 12.9), L['wall'], bevel=0.04))
-    parts.append(box('WallFront', (-4, -3, -0.125), (4, -2.75, 12.9), L['wall'], bevel=0.04))
-    for p in parts:
-        cut(p, bc)
-    for z in [1.4, 4.4, 7.4, 10.4]:
-        box(f'Win{z}', (-3.2, -3.06, z), (-1.6, -2.95, z + 1.2), L['navy'], bevel=0.03)
-        box(f'WinG{z}', (-3.05, -3.08, z + 0.15), (-1.75, -3.0, z + 1.05), L['glass'], bevel=0.01)
-        box(f'Sill{z}', (-3.3, -3.18, z - 0.08), (-1.5, -2.95, z + 0.0), L['sill'], bevel=0.015)
-    for i, ft in enumerate(FLOOR_TOPS):
-        box(f'Tile{i}', (1.2, 2.68, ft), (3.75, 2.75, ft + 2.7), L['tile'], bevel=0.0)
-
-    # pipes/cores get their own cut plane 4 mm behind the building's, so where they pass through a slab the
-    # slab's cut face hides them (no coplanar z-fighting)
-    pc = cutter('PipeCut', (-0.6, -6, 0.2), (7, 0.004, 17), L['hatch'])
-
-    # classic black polyethylene roof tank: ribbed cylinder, domed top, screw lid, outlet near the base,
-    # on a low steel stand on the roof slab; cut open with the water level visible
-    sb = ROOF_Z + STAND_H
-    tq = cutter('TankQuarter', (TANK_X, -2.0, ROOF_Z + 0.2), (TANK_X + 2.0, 0.0, 15.5), L['hatch'])   # front-right wedge
-    for dx in (-0.62, 0.62):
-        for dy in (-0.62, 0.62):
-            box(f'StandLeg{dx}{dy}', (TANK_X + dx - 0.05, dy - 0.05, ROOF_Z), (TANK_X + dx + 0.05, dy + 0.05, sb - 0.05), L['pipe'], bevel=0.012)
-    box('StandTopX', (TANK_X - 0.72, -0.72, sb - 0.06), (TANK_X + 0.72, 0.72, sb), L['pipe'], bevel=0.015)
-    for i, (dx, dy, dz) in enumerate([(x, y, z) for x in (-TANK_R, TANK_R) for y in (-TANK_R, TANK_R) for z in (sb, sb + TANK_H + 0.25)]):
-        anchor(f'kTank{i}', (TANK_X + dx, dy, dz))
-    tank = cyl('Tank', (TANK_X, 0, sb + TANK_H / 2), TANK_R, TANK_H, L['poly'], bevel=0.05, verts=56)
-    hollow(tank, cyl('TankHollow', (TANK_X, 0, sb + TANK_H / 2 + 0.04), TANK_R - 0.06, TANK_H, L['poly'], bevel=0, verts=56))
-    cut(tank, tq)
-    for k in range(5):                                  # horizontal ribs
-        z = sb + 0.18 + k * (TANK_H - 0.36) / 4
-        bpy.ops.mesh.primitive_torus_add(major_radius=TANK_R, minor_radius=0.035, major_segments=56, minor_segments=8, location=(TANK_X, 0, z))
-        r = bpy.context.object; r.name = f'Rib{k}'; r.data.materials.append(L['poly']); cut(r, tq)
-    bpy.ops.mesh.primitive_uv_sphere_add(segments=56, ring_count=16, radius=TANK_R, location=(TANK_X, 0, sb + TANK_H))
-    dome = bpy.context.object; dome.name = 'TankDome'; dome.scale = (1, 1, 0.24); apply_scale(dome)
-    dome.data.materials.append(L['poly'])
-    for poly in dome.data.polygons:
-        poly.use_smooth = True
-    domecut = cutter('DomeLower', (TANK_X - 1.2, -1.2, sb + TANK_H - 0.4), (TANK_X + 1.2, 1.2, sb + TANK_H - 0.01), L['hatch'])
-    m = dome.modifiers.new('Half', 'BOOLEAN'); m.operation = 'DIFFERENCE'; m.solver = 'EXACT'; m.object = domecut
-    cut(dome, tq)
-    lid_z = sb + TANK_H + TANK_R * 0.24 - 0.01            # screw lid sits ON the dome
-    lid = cyl('TankLid', (TANK_X, 0, lid_z + 0.04), 0.27, 0.09, L['poly'], bevel=0.02, verts=40)
-    for k in range(16):                                  # knurled grip
-        ang = k / 16 * 2 * math.pi
-        bx = box(f'LidGrip{k}', (-0.012, -0.03, -0.035), (0.012, 0.03, 0.035), L['poly'], bevel=0.005)
-        bx.location = (TANK_X + 0.275 * math.cos(ang), 0.275 * math.sin(ang), lid_z + 0.04); bx.rotation_euler = (0, 0, ang)
-    cut(lid, tq)
-    wh = Z_SURF - (sb + 0.07)
-    cut(cyl('TankWater', (TANK_X, 0, sb + 0.07 + wh / 2), TANK_R - 0.065, wh, L['water'], bevel=0, verts=56), tq, keep_material=True)
-    anchor('surface', (TANK_X - TANK_R, -0.02, Z_SURF)); anchor('tank', (TANK_X, -0.02, sb + TANK_H + 0.4))
-
-    # riser: tank bottom → ground floor, light grey pipe with a translucent flowing water core
-    rz0, rz1 = 0.4, sb + 0.02
-    riser = cyl('Riser', (TANK_X, 0, (rz0 + rz1) / 2), 0.11, rz1 - rz0, L['pipe'], bevel=0, verts=24)
-    hollow(riser, cyl('RiserBore', (TANK_X, 0, (rz0 + rz1) / 2), 0.085, rz1 - rz0 + 0.4, L['pipe'], bevel=0, verts=24))
-    cut(riser, pc)
-    cut(cyl('RiserCore', (TANK_X, 0, (rz0 + rz1) / 2), 0.084, rz1 - rz0 - 0.02, L['pipeWater'], bevel=0, verts=24), pc, keep_material=True)
-
-    # floor taps with pressure gauges (ground, 1st, 2nd); ground tap gushes into a bucket
-    for i, ft in enumerate(FLOOR_TOPS[:3]):
-        z = ft + 1.15
-        pipe(f'Branch{i}', (TANK_X, 0.0, z), (TANK_X, 0.45, z), 0.05, L['pipe'])
-        pipe(f'BranchX{i}', (TANK_X - 0.02, 0.45, z), (2.55, 0.45, z), 0.05, L['pipe'])
-        pipe(f'Spout{i}', (2.5, 0.45, z), (2.72, 0.45, z - 0.04), 0.05, L['pipe'])
-        box(f'Handle{i}', (2.42, 0.38, z + 0.07), (2.55, 0.52, z + 0.12), L['navy'], bevel=0.01)
-        gauge(f'G{i}', (2.3, 0.45, z + 0.78), L, bar_at(z), stem=((2.3, 0.45, z), (2.3, 0.45, z + 0.4)))
-    bucket = cyl('Bucket', (3.3, 0.45, 0.33), 0.26, 0.42, L['navy'], bevel=0.02, verts=32)
-    hollow(bucket, cyl('BucketIn', (3.3, 0.45, 0.38), 0.23, 0.42, L['navy'], bevel=0, verts=32))
-    cyl('BucketWater', (3.3, 0.45, 0.42), 0.225, 0.2, L['water'], bevel=0, verts=32)
-
-    # top-floor supply: tank outlet (near the base) → (booster pump goes here, on the roof) → down-line → shower
-    oz = OUTLET_Z
-    pipe('Outlet', (TANK_X + TANK_R - 0.02, 0, oz), (3.0, 0, oz), 0.05, L['pipe'])
-    cyl('OutletCollar', (TANK_X + TANK_R + 0.02, 0, oz), 0.08, 0.06, L['poly'], rot=(0, math.radians(90), 0), bevel=0.01, verts=24)
-    OBJ['inline'] = pipe('Inline', (3.0, 0, oz), (3.42, 0, oz), 0.05, L['pipe'])          # replaced by the pump
-    pipe('Elbow', (3.42, 0, oz), (3.55, 0, oz), 0.05, L['pipe'])
-    dz1 = 11.55
-    down = cyl('DownLine', (3.5, 0, (oz + dz1) / 2), 0.065, oz - dz1, L['pipe'], bevel=0, verts=20)
-    hollow(down, cyl('DownBore', (3.5, 0, (oz + dz1) / 2), 0.048, oz - dz1 + 0.3, L['pipe'], bevel=0, verts=20))
-    cut(down, pc)
-    cut(cyl('DownCore', (3.5, 0, (oz + dz1) / 2), 0.047, oz - dz1 - 0.02, L['pipeWater'], bevel=0, verts=20), pc, keep_material=True)
-    pipe('ShowerFeed', (3.5, 0, dz1), (3.5, 0.45, dz1), 0.05, L['pipe'])
-    pipe('ShowerArm', (3.5, 0.45, dz1), (3.5, 0.45, 11.32), 0.04, L['pipe'])
-    cyl('ShowerHead', (3.5, 0.45, 11.3), 0.17, 0.06, L['pipe'], bevel=0.02, verts=32)
-    gauge('G3', (2.95, 0.45, 11.35), L, bar_at(11.3), boosted=2.0, stem=((3.5, 0.45, 11.45), (3.3, 0.45, 11.45)), label_side=-1)
-    anchor('shower', (3.5, 0.45, 10.6)); anchor('showerEdge', (3.95, 0.45, 9.3))
-    anchor('showerHead', (3.5, 0.45, 11.3)); anchor('showerL', (3.2, 0.45, 10.5)); anchor('showerR', (3.8, 0.45, 10.5))   # head + upper spray
+CURVE_START, CURVE_R, CURVE_DEG = 620.0, 420.0, 45.0      # entry of the first (left-hand) curve of the S
 
 
-# ---------------------------------------------------------------- pressure gauges (dial + animated needle)
-GAUGES = []
+def set_curve(L, coaches=24, hero_s=None):
+    """Set A: 620 m straight → 300 m-radius left curve over 120° (cant 0.12 m) → straight.
+    A loco + `coaches` coaches; hero_s = arc length of the first coach (behind the loco)."""
+    path = Path([('straight', CURVE_START), ('arc', CURVE_R, CURVE_DEG, +1), ('straight', 60), ('arc', CURVE_R, 55, -1),
+                 ('straight', 260)], origin=(0, -CURVE_START, 0), heading_deg=90, cant=0.12)
+    build_track('A', path, 0, path.length, L)
+    SET['A'] = dict(path=path)
+    # hero coach (index 0, behind the loco) gets real bogies; the rest are instanced
+    hero_s = CURVE_START + 6.0 if hero_s is None else hero_s
+    bog = []
+    for k, off in enumerate((BOGIE_C, -BOGIE_C)):
+        b, ws = build_bogie(f'HeroBogie{k}', L); place_on_track(b, path, hero_s + off); bog.append((b, ws))
+    body = build_coach_body('HeroBody', L)
+    place_body(body, path, hero_s)
+    SET['A'].update(hero_s=hero_s, bogies=bog, body=body)
+    # loco ahead of the hero coach
+    loco = build_coach_body('Loco', L, livery='loco'); place_body(loco, path, hero_s + 22.5)
+    for k, off in enumerate((BOGIE_C - 1.5, -BOGIE_C + 1.5)):
+        b, _ = build_bogie(f'LocoBogie{k}', L, damper=False); place_on_track(b, path, hero_s + 22.5 + off)
+    SET['A']['loco'] = loco
+    # instanced coaches behind (static geometry is plenty at that distance)
+    col = bpy.data.collections.new('CoachInst'); bpy.context.scene.collection.children.link(col)
+    prev = bpy.context.view_layer.active_layer_collection
+    bpy.context.view_layer.active_layer_collection = bpy.context.view_layer.layer_collection.children['CoachInst']
+    cb = build_coach_body('InstBody', L)
+    for k, off in enumerate((BOGIE_C, -BOGIE_C)):
+        b, _ = build_bogie(f'InstBogie{k}', L, damper=True); b.location = (0, off, 0)
+        b.parent = cb
+    bpy.context.view_layer.active_layer_collection = prev
+    col.hide_render = False
+    excl = bpy.context.view_layer.layer_collection.children['CoachInst']; excl.exclude = True
+    insts = []
+    for i in range(1, coaches):
+        s = hero_s - 24.0 * i
+        if s - BOGIE_C < 1:
+            break
+        o = bpy.data.objects.new(f'Coach{i}', None); o.instance_type = 'COLLECTION'; o.instance_collection = col
+        bpy.context.collection.objects.link(o); place_body(o, path, s); insts.append(o)
+    SET['A']['insts'] = insts
+    return path
 
 
-def gauge(name, loc, L, value, boosted=None, stem=None, label_side=1):
-    """Large dial facing the camera (−y). 0–2.5 bar over −120°..+120°. Needle springs to `value` at its cue."""
-    x, y, z = loc
-    a, b = stem if stem else ((x, y, z - 0.6), (x, y, z - 0.38))
-    pipe(f'{name}Stem', a, b, 0.03, L['pipe'])
-    cyl(f'{name}Body', (x, y, z), 0.4, 0.1, L['navy'], rot=(math.radians(90), 0, 0), bevel=0.03, verts=48)
-    cyl(f'{name}Face', (x, y - 0.052, z), 0.34, 0.012, L['dial'], rot=(math.radians(90), 0, 0), bevel=0, verts=48)
-    for k in range(11):
-        an = math.radians(-120 + 240 * k / 10)
-        r1, r2 = 0.26, (0.32 if k % 2 == 0 else 0.3)
-        p1 = (x + r1 * math.sin(an), y - 0.062, z + r1 * math.cos(an)); p2 = (x + r2 * math.sin(an), y - 0.062, z + r2 * math.cos(an))
-        pipe(f'{name}T{k}', p1, p2, 0.01, L['tick'], verts=6)
-    # red zone arc marker near the top of the scale
-    piv = bpy.data.objects.new(f'{name}Pivot', None); bpy.context.collection.objects.link(piv); piv.location = (x, y - 0.072, z)
-    nd = box(f'{name}Needle', (-0.016, -0.006, -0.04), (0.016, 0.006, 0.27), L['needle'], bevel=0.005); nd.parent = piv
-    hub = cyl(f'{name}Hub', (0, 0, 0), 0.036, 0.018, L['navy'], rot=(math.radians(90), 0, 0), bevel=0, verts=20); hub.parent = piv
-    ang = lambda v: math.radians(-120 + 240 * min(1.0, v / 2.5))
-    t_cue = NEEDLE_CUE[name]
-    if name == 'G3':        # top floor: already reads its low value on frame 1 (cold open = loop end), dips and re-springs at its cue
-        piv.rotation_euler = (0, ang(value), 0)
-        piv.keyframe_insert('rotation_euler', index=1, frame=1); piv.keyframe_insert('rotation_euler', index=1, frame=fr(t_cue) - 4)
-    piv.rotation_euler = (0, ang(0), 0); piv.keyframe_insert('rotation_euler', index=1, frame=fr(t_cue))
-    piv.rotation_euler = (0, ang(value), 0); piv.keyframe_insert('rotation_euler', index=1, frame=fr(t_cue + 0.7))
-    if boosted:
-        piv.keyframe_insert('rotation_euler', index=1, frame=fr(BOOST_T))
-        piv.rotation_euler = (0, ang(boosted), 0); piv.keyframe_insert('rotation_euler', index=1, frame=fr(BOOST_T + 0.8))
-    for fc in fcurves_of(piv):
-        for kp in fc.keyframe_points:
-            kp.interpolation = 'BACK'; kp.easing = 'EASE_OUT'; kp.back = 1.4   # spring-like overshoot
-    anchor(name, (x + 0.5 * label_side, y - 0.07, z)); anchor('c' + name, (x, y - 0.07, z)); anchor('e' + name, (x + 0.4, y - 0.07, z + 0.4))
-    GAUGES.append(dict(name=name, value=round(value, 2), boosted=boosted, cue=t_cue))
+def place_body(obj, path, s):
+    """Coach body follows the chord between its two bogie centres."""
+    pa, _, _, ua = path.at(s + BOGIE_C); pb, _, _, ub = path.at(s - BOGIE_C)
+    fwd = (pa - pb).normalized(); up = (ua + ub).normalized(); right = fwd.cross(up).normalized(); up = right.cross(fwd)
+    m = Matrix((right, fwd, up)).transposed().to_4x4()
+    obj.matrix_world = Matrix.Translation((pa + pb) / 2 + up * (RAIL_H + R0)) @ m
 
 
-# ---------------------------------------------------------------- height pole (from the ground) + dashed water-level line
-def build_ruler(L):
-    rx, ry = 4.75, -0.35
-    box('Pole', (rx - 0.08, ry - 0.08, -0.12), (rx + 0.08, ry + 0.08, Z_SURF + 0.35), L['pole'], bevel=0.025)
-    for k in range(0, int(Z_SURF) + 1):
-        major = k in (0, 10)
-        ln = 0.42 if major else (0.26 if k % 5 == 0 else 0.15)
-        box(f'Pt{k}', (rx - 0.08 - ln, ry - 0.045, k + 0.0 - 0.03 + (0.03 if k == 0 else 0)), (rx - 0.08, ry + 0.045, k + 0.03 + (0.03 if k == 0 else 0)),
-            L['needle'] if major else L['tick'], bevel=0.01)
-    box('PtTank', (rx - 0.08 - 0.42, ry - 0.045, Z_SURF - 0.03), (rx - 0.08, ry + 0.045, Z_SURF + 0.03), L['needle'], bevel=0.01)
-    # dashed line: tank water level → pole
-    x0, x1 = TANK_X + TANK_R + 0.05, rx - 0.55
-    n = int((x1 - x0) / 0.16)
-    for i in range(n):
-        xa = x0 + i * (x1 - x0) / n
-        box(f'Dash{i}', (xa, ry - 0.02, Z_SURF - 0.02), (xa + 0.09, ry + 0.02, Z_SURF + 0.02), L['needle'], bevel=0.0)
-    anchor('pole0', (rx + 0.18, ry, 0.03)); anchor('pole10', (rx + 0.18, ry, 10.0)); anchor('poleTank', (rx + 0.18, ry, Z_SURF))
-    anchor('dash', ((x0 + x1) / 2, ry, Z_SURF + 0.15))
+def set_demo(L, origin=(0, 3000, 0), taper=1 / 5, drift=0.0, section=True, rings=True, xb=XB, key='B', morph_taper=None,
+             ticks=True, length=16.0, ws_s=1.4):
+    """A lone wheelset on a short straight track (front view), optional half-section cut and rolling rings.
+    key prefixes every object so several demo rigs can coexist; SET[key] holds the handles."""
+    path = Path([('straight', length)], origin=origin, heading_deg=90)
+    build_track(key, path, 0.0, length, L, ballast=False)
+    for o in list(bpy.data.objects):                      # demo rails: one solid steel body (no head skin → clean section)
+        if o.name.startswith(key + 'Rail') and o.name.endswith('Head'):
+            bpy.data.objects.remove(o, do_unlink=True)
+        elif o.name.startswith(key + 'Rail') and o.name.endswith('Foot'):
+            o.data.materials[0] = L['railHead']
+    ws = build_wheelset(key + 'WS', L, taper=taper, discs=False, ticks=ticks, xb=xb, morph_taper=morph_taper)
+    place_on_track(ws, path, ws_s, drift=drift, lift=-0.0012)          # seated on the railhead: no visible gap
+    SET[key] = dict(path=path, ws=ws, taper=taper, drift=drift, s=ws_s, morph=morph_taper, rings={})
+    if section:
+        c = cutter(key + 'Cut', (-1.3, -1.5, -0.7), (1.3, 0.0, 0.7), L['hatch'])
+        bpy.context.view_layer.update()
+        c.matrix_world = ws.matrix_world @ Matrix.Translation((0, -0.75, 0)); parent(c, ws)
+        for o in spin_of(ws).children:
+            if 'Rim' in o.name:
+                cut(o, c)
+        p0, t0, r0, u0 = path.at(ws_s)
+        tc = cutter(key + 'TrackCut', (p0.x - 4, p0.y - 6, -1.0), (p0.x + 4, p0.y, 1.0), L['hatchRail'])
+        for o in list(bpy.data.objects):
+            if o.name.startswith(key + 'Rail'):
+                cut(o, tc)
+            elif o.name.startswith(key + 'Sleepers'):
+                cut(o, tc, keep_material=True)
+    if rings:
+        for side in (-1, 1):
+            rg = ring(f'{key}Ring{side:+d}', L['glowO'], r=1.0, minor=0.006)
+            rg.rotation_euler = (0, math.radians(90), 0); rg.parent = ws
+            SET[key]['rings'][side] = rg
+        demo_pose(key, drift, taper)
+    return path
 
 
-# ---------------------------------------------------------------- bottle on a crate on the roof (open, no cap)
-B_BASE = Vector((-2.75, -1.0, 12.625))
-B_H, B_R, WATER_LVL = 0.36, 0.045, 0.30
-HOLE_LOW, HOLE_HIGH = 0.04, 0.285
+def demo_pose(key, drift, taper, lift=-0.0012, roll_dist=None):
+    """Re-seat a demo wheelset: sideways drift and current taper (rings follow the contact circles)."""
+    D = SET[key]; ws = D['ws']
+    place_on_track(ws, D['path'], D['s'], drift=drift, lift=lift)
+    for side, rg in D['rings'].items():
+        x = side * RAIL_C - drift
+        r = tread_r(x, taper)
+        rg.location = (x, 0, 0); s_ = r / 1.0; rg.scale = (s_, s_, s_)
+        rg.hide_render = taper <= 0.0
+    if roll_dist is not None:
+        roll(ws, roll_dist)
 
 
-def build_bottle(L):
-    box('Crate', (-2.85, -1.25, ROOF_Z), (-2.2, -0.75, B_BASE.z), L['wood'], bevel=0.015)
-    for i in range(3):
-        box(f'Slat{i}', (-2.86, -1.26, ROOF_Z + 0.05 + i * 0.15), (-2.19, -0.74, ROOF_Z + 0.09 + i * 0.15), L['wood'], bevel=0.008)
-    bc = cutter('BottleCut', (-3.2, -1.7, 12.5), (-2.3, -1.0, 13.2), L['hatch'])
-    bottle = cyl('Bottle', (B_BASE.x, B_BASE.y, B_BASE.z + B_H / 2), B_R, B_H, L['plastic'], bevel=0.012, verts=40)
-    hollow(bottle, cyl('BottleIn', (B_BASE.x, B_BASE.y, B_BASE.z + B_H / 2 + 0.006), B_R - 0.003, B_H, L['plastic'], bevel=0, verts=40))
-    # open neck — no cap, so air can get in and the water keeps flowing
-    neck = cyl('Neck', (B_BASE.x, B_BASE.y, B_BASE.z + B_H + 0.022), 0.017, 0.045, L['plastic'], bevel=0.003, verts=24)
-    hollow(neck, cyl('NeckIn', (B_BASE.x, B_BASE.y, B_BASE.z + B_H + 0.03), 0.013, 0.06, L['plastic'], bevel=0, verts=24))
-    water = cyl('BottleWater', (B_BASE.x, B_BASE.y, B_BASE.z + 0.006 + (WATER_LVL - 0.006) / 2), B_R - 0.0035, WATER_LVL - 0.006,
-                L['bottleWater'], bevel=0, verts=40)
-    # visible water line (meniscus ring) with the air gap above it
-    bpy.ops.mesh.primitive_torus_add(major_radius=B_R - 0.0035, minor_radius=0.0016, location=(B_BASE.x, B_BASE.y, B_BASE.z + WATER_LVL))
-    ml = bpy.context.object; ml.name = 'Meniscus'; ml.data.materials.append(L['cap'])
-    for md in (cut(bottle, bc), cut(water, bc, keep_material=True), cut(ml, bc)):
-        key_mod(md, fr(BOTTLE_CUT) - 1, False); key_mod(md, fr(BOTTLE_CUT), True)
-    for z in (HOLE_LOW, HOLE_HIGH):
-        bpy.ops.mesh.primitive_torus_add(major_radius=0.006, minor_radius=0.0018, location=(B_BASE.x - B_R, B_BASE.y, B_BASE.z + z),
-                                         rotation=(0, math.radians(90), 0))
-        bpy.context.object.data.materials.append(L['navy'])
-    anchor('bottle', (B_BASE.x, B_BASE.y, B_BASE.z + B_H / 2))
+def set_turnout(L, origin=(3000, 0, 0), u=1.0, R=120.0, throw=0.11):
+    """Set C: right-hand turnout. u = 0 straight route set, 1 diverging route set (switch rails slide together)."""
+    ox, oy, oz = origin
+    xc = lambda y: (R - math.sqrt(max(0.0, R * R - y * y))) if y > 0 else 0.0
+    hd = lambda y: math.atan2(y, math.sqrt(max(1e-6, R * R - y * y))) if y > 0 else 0.0
+
+    def frames(fx, y0, y1, step=0.25, dx=lambda y: 0.0, curved=False):
+        out = []; y = y0
+        while y <= y1 + 1e-6:
+            x = fx(y) + dx(y); a = hd(y) if curved else 0.0
+            right = Vector((math.cos(a), -math.sin(a), 0)); out.append((Vector((ox + x, oy + y, oz)), right, Vector((0, 0, 1)))); y += step
+        return out
+
+    toe, heel = 0.0, 10.0
+    rails = []
+    rails += build_rail('TStockL', frames(lambda y: -RAIL_C, -16, 34), -1, L)
+    rails += build_rail('TStockR', frames(lambda y: xc(y) + RAIL_C, -16, 34, curved=True), 1, L)
+    open_l = lambda y: throw * (1 - u) * max(0.0, 1 - y / heel)
+    open_r = lambda y: -throw * u * max(0.0, 1 - y / heel)
+    bl = build_rail('TBladeL', frames(lambda y: xc(y) - RAIL_C, toe, heel, dx=open_l, curved=True), 1, L, head_mat=L['glowO'])
+    br = build_rail('TBladeR', frames(lambda y: RAIL_C, toe, heel, dx=open_r), -1, L, head_mat=L['glowO'])   # moving parts glow
+    rails += list(bl) + list(br)
+    rails += build_rail('TClosureR', frames(lambda y: RAIL_C, heel, 19.6), -1, L)
+    rails += build_rail('TClosureL', frames(lambda y: xc(y) - RAIL_C, heel, 19.6, curved=True), 1, L)
+    rails += build_rail('TExitR', frames(lambda y: RAIL_C, 21.4, 34), -1, L)
+    rails += build_rail('TExitL', frames(lambda y: xc(y) - RAIL_C, 21.4, 34, curved=True), 1, L)
+    # timbers
+    bm = bmesh.new(); y = -15.7
+    while y < 34:
+        x0, x1 = -1.45, xc(y) + 1.45 if y > 0 else 1.45
+        x1 = max(1.45, xc(y) + 1.45)
+        vs = [bm.verts.new((ox + x, oy + yy, z)) for x in (x0, x1) for yy in (y - 0.125, y + 0.125) for z in (-0.21, 0.0)]
+        idx = lambda a, b, c: vs[a * 4 + b * 2 + c]
+        for f in ([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)], [(0, 0, 1), (0, 1, 1), (1, 1, 1), (1, 0, 1)],
+                  [(0, 0, 0), (0, 0, 1), (1, 0, 1), (1, 0, 0)], [(0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1)],
+                  [(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)], [(1, 0, 0), (1, 0, 1), (1, 1, 1), (1, 1, 0)]):
+            bm.faces.new([idx(*c) for c in f])
+        y += 0.6
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces); tim = mesh_obj('TTimbers', bm, L['sleeper'])
+    box('TBallast', (ox - 3.4, oy - 17, oz - 0.62), (ox + 7.5, oy + 35, oz - 0.05), L['ballast'], bevel=0.3)
+    # stretcher bars + point machine (move with the switch rails)
+    for k, y in enumerate((0.35, 1.6)):
+        dx = (open_l(y) + open_r(y)) / 2
+        box(f'TStretch{k}', (ox - RAIL_C - 0.02 + dx, oy + y - 0.03, oz + 0.02), (ox + RAIL_C + 0.02 + dx, oy + y + 0.03, oz + 0.06), L['axle'], bevel=0.005)
+    box('TMachine', (ox - 2.45, oy - 0.1, oz - 0.05), (ox - 1.55, oy + 0.8, oz + 0.35), L['machine'], bevel=0.05)
+    pipe('TMachineRod', (ox - 1.55, oy + 0.35, oz + 0.04), (ox - RAIL_C + (open_l(0.35) + open_r(0.35)) / 2, oy + 0.35, oz + 0.04), 0.015, L['axle'])
+    SET['C'] = dict(origin=Vector(origin), xc=xc, hd=hd, R=R)
+    return SET['C']
 
 
-# ---------------------------------------------------------------- streams
-def build_streams(L):
-    W = L['glassWater']; o = B_BASE
-    v_low = math.sqrt(2 * G * (WATER_LVL - HOLE_LOW))                    # ≈ 2.3 m/s (Torricelli)
-    WET = L['wet']
-    Stream('JetLow', (o.x - B_R - 0.003, o.y, o.z + HOLE_LOW), (-v_low, 0, 0), ROOF_Z, 0.022, W, HOLE_LOW_OPEN,
-           brk=0.3, n_drops=26, splash_v=0.5, splash_n=14, splash_r=0.45, wet_r=0.11, wet_mat=WET)
-    # high hole: only 1.5 cm of water above it → a weak dribble that clings and runs down the bottle side
-    Stream('DribbleHigh', (o.x - B_R - 0.003, o.y, o.z + HOLE_HIGH), (0, 0, 0), o.z, 0.0065, W, HOLE_HIGH_OPEN,
-           brk=0.7, n_drops=6, wobble=0.004, splash=True, splash_n=4, splash_v=0.12, splash_r=0.5, wet_r=0.035, wet_mat=WET,
-           cling=(o.x - B_R - 0.004, o.y, o.z + 0.002), grow=1.2)
-    # ground-floor tap: thick, fast gush that splashes out of the bucket
-    z0 = FLOOR_TOPS[0] + 1.15 - 0.06
-    Stream('Gush', (2.74, 0.45, z0), (2.0, 0, -0.15), 0.55, 0.06, W, -2.0, brk=0.55, n_drops=22,
-           splash_v=1.4, splash_n=16, splash_r=0.55)
-    # top-floor shower BEFORE the pump: weak, wobbly dribbles + drips (approved look)
-    for i, (dx, dy) in enumerate([(-0.06, 0.0), (0.03, 0.05), (0.05, -0.04), (-0.02, -0.06)]):
-        Stream(f'Weak{i}', (3.5 + dx, 0.45 + dy, 11.26), (0.02 * dx, 0.02 * dy, -0.05), FLOOR_TOPS[3], 0.017, W, -2.0,
-               t_off=SHOWER_FULL + 0.2, brk=0.14 + 0.05 * i, n_drops=5, wobble=0.016, splash=(i == 0),
-               splash_v=0.2, splash_n=5, splash_r=0.5, wet_r=0.12, wet_mat=WET, layer=1)
-    # AFTER the pump: dense, wide, strong cone (three rings, 40 streams) + fine mist
-    k = 0
-    for ring, (n, r, out) in enumerate([(8, 0.04, 0.35), (14, 0.09, 0.8), (18, 0.14, 1.25)]):
-        for i in range(n):
-            a = i / n * 2 * math.pi + ring * 0.21
-            Stream(f'Full{k}', (3.5 + r * math.cos(a), 0.45 + r * math.sin(a), 11.26),
-                   (out * math.cos(a), out * math.sin(a), -2.4), FLOOR_TOPS[3], 0.0085 + 0.002 * (k % 3), W, SHOWER_FULL,
-                   brk=0.32 + 0.12 * ((k * 7) % 5) / 4, n_drops=12, splash=(k % 3 == 0), grow=0.45, splash_v=0.6, splash_n=4, splash_r=0.7,
-                   wet_r=(0.42 if k == 0 else 0.0), wet_mat=WET, layer=2)   # one soft wet patch under the shower
-            k += 1
-    MIST.clear()
-    for i in range(70):
-        MIST.append(sphere(f'Mist{i}', (3.5, 0.45, 11.0), 1.0, W, seg=8))
+def place_on_turnout(obj, ystation, diverging=True):
+    C = SET['C']; o = C['origin']
+    x = C['xc'](ystation) if diverging else 0.0; a = C['hd'](ystation) if diverging else 0.0
+    right = Vector((math.cos(a), -math.sin(a), 0)); fwd = Vector((math.sin(a), math.cos(a), 0)); up = Vector((0, 0, 1))
+    obj.matrix_world = Matrix.Translation(o + Vector((x, ystation, RAIL_H + R0))) @ Matrix((right, fwd, up)).transposed().to_4x4()
 
 
-MIST = []
+HUNT_L = 17.4                                      # kinematic wavelength 2π√(r0·b/λ) for λ = 1/20
 
 
-# ---------------------------------------------------------------- booster pump (inline on the down-line, on the roof slab)
-PUMP = {}
+def hunt_offset(s, s0=0.0, a0=0.003, grow=0.06, amax=0.0385):
+    a = min(amax, a0 * math.exp(grow * max(0.0, s - s0)))
+    return a * math.sin(2 * math.pi * (s - s0) / HUNT_L), a
 
 
-def build_pump(L):
-    oz = OUTLET_Z
-    bpy.ops.object.empty_add(location=(3.21, 0, oz)); root = bpy.context.object; root.name = 'PumpRoot'
-    parts = [
-        cyl('PumpBody', (3.21, 0, oz), 0.2, 0.36, L['yellow'], rot=(0, math.radians(90), 0), bevel=0.03, verts=40),
-        cyl('FlangeIn', (3.02, 0, oz), 0.09, 0.04, L['navy'], rot=(0, math.radians(90), 0), bevel=0.01, verts=24),
-        cyl('FlangeOut', (3.40, 0, oz), 0.09, 0.04, L['navy'], rot=(0, math.radians(90), 0), bevel=0.01, verts=24),
-        box('PumpMotor', (3.02, 0.06, oz + 0.16), (3.40, 0.46, oz + 0.42), L['navy'], bevel=0.04),
-        box('PumpFeet', (3.0, -0.25, ROOF_Z), (3.42, 0.3, oz - 0.17), L['navy'], bevel=0.02),
-    ]
-    pc = cutter('PumpCut', (2.9, -1.0, oz - 0.4), (3.55, 0.0, oz + 0.6), L['hatch'])
-    cut(parts[0], pc)
-    imp = bpy.data.objects.new('Impeller', None); bpy.context.collection.objects.link(imp); imp.location = (3.21, -0.01, oz)
-    for i in range(6):
-        b = box(f'Blade{i}', (-0.012, -0.012, -0.15), (0.012, 0.012, 0.15), L['steel'], bevel=0.006)
-        b.parent = imp; b.rotation_euler = (i / 6 * math.pi, 0, 0)
-    hub = cyl('Hub', (0, 0, 0), 0.05, 0.08, L['navy'], rot=(0, math.radians(90), 0), bevel=0.01, verts=20); hub.parent = imp
-    for o in parts + [pc, imp]:
-        o.parent = root; o.matrix_parent_inverse = root.matrix_world.inverted()
-    PUMP['imp'] = imp
-    for i, (dx, dy, dz) in enumerate([(x, y, z) for x in (2.95, 3.47) for y in (-0.25, 0.46) for z in (oz - 0.2, oz + 0.44)]):
-        k = anchor(f'kPump{i}', (dx, dy, dz)); k.parent = root; k.matrix_parent_inverse = root.matrix_world.inverted()
-    root.location.z = oz + 3.0; root.keyframe_insert('location', index=2, frame=1)
-    root.keyframe_insert('location', index=2, frame=fr(PUMP_DROP))
-    root.location.z = oz; root.keyframe_insert('location', index=2, frame=fr(PUMP_LAND))
-    for fc in fcurves_of(root):
-        for kp in fc.keyframe_points:
-            kp.interpolation = 'BEZIER'
-            if int(round(kp.co[0])) == fr(PUMP_DROP):
-                kp.interpolation = 'BOUNCE'; kp.easing = 'EASE_OUT'
-    key_visible(root, 1, False)
-    for o in [root] + parts + list(imp.children):
-        key_visible(o, fr(PUMP_DROP) - 1, False); key_visible(o, fr(PUMP_DROP), True)
-    key_visible(OBJ['inline'], fr(PUMP_LAND) - 1, True); key_visible(OBJ['inline'], fr(PUMP_LAND), False)
+def set_hunting(L, origin=(-3000, 0, 0), s_now=70.0, trail_gain=16.0):
+    """Set D: straight track; a bogie whose sideways swing grows (hunting); glowing zig-zag trail behind it."""
+    path = Path([('straight', 120)], origin=origin, heading_deg=90)
+    build_track('D', path, 0, 120, L)
+    b, ws = build_bogie('HuntBogie', L)
+    d, a = hunt_offset(s_now)
+    yaw = (hunt_offset(s_now + 0.05)[0] - hunt_offset(s_now - 0.05)[0]) / 0.1
+    place_on_track(b, path, s_now, drift=d, yaw=-math.atan(yaw))
+    pts = []; s = 2.0
+    while s <= s_now - 1.28:
+        p, t, r, up = path.at(s); dd, _ = hunt_offset(s)
+        pts.append(tuple(p + r * dd * trail_gain + up * (RAIL_H + 0.03))); s += 0.2
+    tr = tube_curve('HuntTrail', pts, 0.05, L['glowO'])
+    SET['D'] = dict(path=path, bogie=b, ws=ws, s=s_now, drift=d, amp=a, trail=tr)
+    return path
 
 
-# ---------------------------------------------------------------- pipe-water scroll (keyframed texture offset)
-def animate_pipe_water(L):
-    m = L['pipeWater']; mp = m.node_tree.nodes['Scroll']
-    tb = min(PUMP_SPIN, END)
-    keys = [(1, 0.0), (fr(tb), -0.45 * tb), (fr(END), -0.45 * tb - 1.2 * (END - tb))]
-    for f, z in keys:
-        mp.inputs['Location'].default_value[2] = -z; mp.inputs['Location'].keyframe_insert('default_value', index=2, frame=f)
-    ease_all(m.node_tree)
+# ---------------------------------------------------------------- camera + render
+def taper_marker(ws, taper, L, y=-0.004):
+    """On the section plane: dashed horizontal reference line, a slope line along the tread, and an angle arc."""
+    m = ws.matrix_world
+    x0, x1 = 0.858, 1.02
+    z = lambda x: -tread_r(x, taper) - 0.004                # just under the tread line (wheel bottom = contact side)
+    p0 = Vector((x0, y, z(x0)))
+    k = 0; x = x0
+    while x < x1:                                          # dashed reference (horizontal)
+        xa, xb = x, min(x + 0.012, x1)
+        tube_curve(f'RefDash{k}', [tuple(m @ Vector((xa, y, z(x0)))), tuple(m @ Vector((xb, y, z(x0))))], 0.0016, L['dash'])
+        x += 0.020; k += 1
+    tube_curve('TaperLine', [tuple(m @ p0), tuple(m @ Vector((x1, y, z(x1))))], 0.0022, L['glowO'])
+    ang = math.atan(taper); arc = []
+    for i in range(13):
+        a = ang * i / 12; rad = 0.07
+        arc.append(tuple(m @ Vector((x0 + rad * math.cos(a), y, z(x0) + rad * math.sin(a)))))
+    tube_curve('TaperArc', arc, 0.0016, L['glowO'])
+    SET['taper_label'] = m @ Vector((x1, y, z(x1)))
 
 
-def on_frame(scene, depsgraph=None):
-    t = tsec(scene)
-    for s in STREAMS:
-        s.update(t)
-    on = t >= SHOWER_FULL + 0.2
-    for i, m in enumerate(MIST):
-        ph = (t * 0.9 + i * 0.6180339) % 1.0
-        a = i * 2.39996; rr = 0.15 + 0.75 * ((i * 37) % 10) / 10
-        tau = ph * 0.6
-        m.location = (3.5 + math.cos(a) * rr * ph, 0.45 + math.sin(a) * rr * ph, 11.2 - 2.4 * tau - 0.5 * G * tau * tau * 0.4)
-        s = (0.006 + 0.004 * ((i * 53) % 10) / 10) if on and m.location.z > FLOOR_TOPS[3] else 0.0
-        m.scale = (s, s, s)
-    if 'imp' in PUMP:
-        spin = max(0.0, t - PUMP_SPIN)
-        PUMP['imp'].rotation_euler = (spin * spin * 6.0 if spin < 1 else 6.0 + (spin - 1) * 12.0, 0, 0)
+def fill_light(at, target, power=60.0, size=1.5):
+    """Soft area fill from the camera side: lifts the shadowed wedge between flange, tread and railhead."""
+    bpy.ops.object.light_add(type='AREA', location=at); l = bpy.context.object; l.name = 'Fill'
+    l.data.energy = power; l.data.size = size; l.data.color = (1.0, 0.95, 0.9)
+    l.rotation_mode = 'QUATERNION'; l.rotation_quaternion = (Vector(target) - Vector(at)).to_track_quat('-Z', 'Y')
+    l.visible_camera = False
+    return l
 
 
-# ---------------------------------------------------------------- camera (eased keyframes per shot)
-OVERLAY_REFRAME = {
-    'M1': (1.5, 1.5, None),      # ground-floor gauge below the overlay zone
-    'M2': (1.3, 1.3, None),
-    'T2': (0.0, -0.85, 32),      # zoom out + tilt down: top-floor gauge and shower above the overlay zone
-    'T3': (-0.1, -0.1, None),    # spray clears the overlay zone; head stays in the upper third
-    'P3': (-0.2, -0.2, None),    # gauge face above the overlay zone
-}
-OVERLAY_PAN = {'P3': -0.14}       # pan left so the shower head leaves the frame edge
-
-
-def shot_poses():
-    """Start/end pose per shot: (cam_start, cam_end, target_start, target_end, lens, fstop)."""
-    Bc = Vector((B_BASE.x, B_BASE.y, B_BASE.z + B_H / 2)); V = lambda *a: Vector(a)
-    SH_T = {s['name']: (s['t0'], s['t1']) for s in SHOTS}
-    v_low = math.sqrt(2 * G * (WATER_LVL - HOLE_LOW)); fall = B_BASE.z + HOLE_LOW - ROOF_Z
-    JET_LAND = V(B_BASE.x - B_R - v_low * math.sqrt(2 * fall / G), B_BASE.y, ROOF_Z)
-    SH_A = (V(3.04, -2.85, 11.0), V(3.08, 0.45, 10.45))     # top-floor shower framing (cold open = loop end)
-    SH_B = (V(3.10, -2.55, 10.95), V(3.10, 0.45, 10.45))     # front view: the right wall's cut face stays out of shot
-    P = {
-        'C0': (SH_A[0], SH_B[0], SH_A[1], SH_B[1], 40, 4.0),
-        'B1': (V(0.55, -3.9, 12.35), V(0.9, -3.0, 12.5), V(1.8, 0.0, 13.25), V(1.8, 0.0, 13.3), 32, 5.6),   # low-angle push-in on the roof tank
-        'B2': dict(lens=45, fstop=3.2, way=[            # bottle ~35% of frame height → follow the jet down to its landing
-            (SH_T['B2'][0], Bc + V(0.05, -1.12, 0.02), Bc + V(-0.03, 0, -0.01)),
-            (HOLE_LOW_OPEN + 0.25, Bc + V(0.0, -1.02, 0.0), Bc + V(-0.07, 0, -0.04)),
-            (SH_T['B2'][1], JET_LAND + V(0.2, -1.3, 0.32), JET_LAND + V(0.16, 0, 0.12))]),
-        'B3': (Bc + V(-0.24, -0.34, 0.14), Bc + V(-0.20, -0.29, 0.12), Bc + V(-0.05, 0, 0.06), Bc + V(-0.05, 0, 0.05), 50, 2.0),
-        'B4': (Bc + V(-0.45, -0.95, 0.06), Bc + V(-0.30, -0.98, 0.08), Bc + V(-0.08, 0, -0.02), Bc + V(-0.06, 0, -0.02), 45, 2.8),
-        'B5': (Bc + V(0.04, -0.95, 0.0), Bc + V(0.0, -0.82, 0.0), Bc, Bc, 45, 2.8),
-        'M1': (V(1.65, -32.7, 7.2), V(1.65, -30.0, 7.2), V(1.65, 0, 7.2), V(1.65, 0, 7.2), 45, 11.0),   # match-cut: same screen position
-        'M2': (V(13.2, -22.0, 10.8), V(12.4, -20.6, 10.3), V(0.9, 0.2, 6.9), V(0.9, 0.2, 6.9), 40, 9.0),
-        'G1': (V(12.2, -17.8, 8.8), V(11.6, -17.0, 8.5), V(2.9, 0.2, 7.0), V(2.9, 0.2, 7.0), 40, 8.0),
-        'G2': (V(7.6, -10.2, 6.2), V(8.4, -9.4, 6.6), V(2.4, 0.45, 6.2), V(2.4, 0.45, 6.3), 40, 7.0),
-        'G3': (V(6.2, -6.0, 2.0), V(5.8, -5.6, 1.9), V(2.95, 0.45, 1.05), V(2.95, 0.45, 1.0), 40, 4.5),
-        'T1': (V(8.0, -8.6, 12.4), V(7.4, -8.0, 12.2), V(2.6, 0.2, 11.8), V(2.6, 0.2, 11.7), 40, 7.0),
-        'T2': (V(5.6, -5.0, 12.9), V(5.3, -4.6, 12.7), V(2.8, 0.3, 12.4), V(2.8, 0.3, 12.3), 40, 5.0),
-        'T3': (V(3.325, -2.33, 11.25), V(3.345, -2.15, 11.22), V(3.325, 0.45, 10.92), V(3.345, 0.45, 10.9), 50, 3.5),   # weak shower big, head in upper third, gauge (0.25 bar) secondary   # weak shower big + centred, gauge secondary
-        'P1': (V(6.4, -6.4, 14.2), V(6.0, -6.0, 13.9), V(2.9, 0.1, 12.7), V(2.9, 0.1, 12.7), 40, 6.0),
-        'P2': (V(5.0, -2.2, 13.45), V(4.7, -1.85, 13.3), V(3.21, 0, 12.6), V(3.21, 0, 12.6), 45, 4.0),
-        'P3': (V(3.75, -1.55, 11.55), V(3.6, -1.35, 11.45), V(2.95, 0.45, 11.35), V(2.95, 0.45, 11.35), 45, 3.5),
-        'P4': (SH_B[0], SH_A[0], SH_B[1], SH_A[1], 40, 4.0),   # reverse of C0: ends exactly on the cold-open frame
-    }
-    # Overlay rule: the text overlay sits at one fixed zone (centred, 70% height). Shots whose gauge reading or
-    # shower would fall in that zone are reframed here (small tilt/zoom).
-    #   name: (camera dz, target dz, lens or None)
-    for name, (dzc, dzt, lens) in OVERLAY_REFRAME.items():
-        p = P[name]
-        c0, c1, g0, g1, ln, fs = p
-        dx = OVERLAY_PAN.get(name, 0.0)
-        P[name] = (c0 + V(dx, 0, dzc), c1 + V(dx, 0, dzc), g0 + V(dx, 0, dzt), g1 + V(dx, 0, dzt), lens or ln, fs)
-    return P
-
-
-def ease_move(u):
-    """Smoothstep blended with linear: eased, but the camera never stops inside a shot."""
-    return 0.3 * u + 0.7 * (u * u * (3 - 2 * u))
-
-
-def build_camera():
+def make_camera(loc, target, lens=35, fstop=5.6, focus=None):
     sc = bpy.context.scene
-    bpy.ops.object.empty_add(location=(0, 0, 0)); tgt = bpy.context.object; tgt.name = 'CamTarget'
-    bpy.ops.object.camera_add(); cam = bpy.context.object; cam.name = 'Cam'; sc.camera = cam
+    tgt = empty('CamTarget', target)
+    bpy.ops.object.camera_add(location=loc); cam = bpy.context.object; cam.name = 'Cam'; sc.camera = cam
     con = cam.constraints.new('TRACK_TO'); con.target = tgt; con.track_axis = 'TRACK_NEGATIVE_Z'; con.up_axis = 'UP_Y'
-    cam.data.dof.use_dof = True; cam.data.dof.focus_object = tgt; cam.data.sensor_width = 36
-    P = shot_poses()
-    last_frames = set()
-    for sh in SHOTS:
-        f0, f1 = fr(sh['t0']), fr(sh['t1']) - 1
-        if sh is SHOTS[-1]:
-            f1 = fr(END)
-        p = P[sh['name']]
-        if isinstance(p, dict):
-            lens, fstop, way = p['lens'], p['fstop'], p['way']
-        else:
-            c0, c1, g0, g1, lens, fstop = p
-            way = [(sh['t0'], c0, g0), (sh['t1'], c1, g1)]
-        wf = [fr(w[0]) for w in way]; wf[0], wf[-1] = f0, f1
-        for f in range(f0, f1 + 1):
-            k = max(i for i in range(len(way) - 1) if wf[i] <= f) if f < wf[-1] else len(way) - 2
-            u = ease_move(min(1.0, (f - wf[k]) / max(1, wf[k + 1] - wf[k])))
-            cam.location = way[k][1].lerp(way[k + 1][1], u); cam.keyframe_insert('location', frame=f)
-            tgt.location = way[k][2].lerp(way[k + 1][2], u); tgt.keyframe_insert('location', frame=f)
-            cam.data.lens = lens; cam.data.keyframe_insert('lens', frame=f)
-            cam.data.dof.aperture_fstop = fstop; cam.data.dof.keyframe_insert('aperture_fstop', frame=f)
-        last_frames.add(f1)
-    for idb in (cam, tgt, cam.data):
-        for fc in fcurves_of(idb):
-            for kp in fc.keyframe_points:
-                kp.interpolation = 'CONSTANT' if int(round(kp.co[0])) in last_frames else 'BEZIER'
+    cam.data.lens = lens; cam.data.sensor_width = 36; cam.data.clip_start = 0.02; cam.data.clip_end = 3000
+    cam.data.dof.use_dof = True; cam.data.dof.aperture_fstop = fstop
+    fo = empty('CamFocus', focus if focus is not None else target); cam.data.dof.focus_object = fo
     return cam
 
 
-# ---------------------------------------------------------------- render setup
 def setup_render(a):
     sc = bpy.context.scene
     sc.render.fps = FPS
@@ -715,72 +788,787 @@ def setup_render(a):
             sc.view_settings.look = want; break
     if a.engine == 'WORKBENCH':
         sc.render.engine = 'BLENDER_WORKBENCH'
-        sh = sc.display.shading; sh.light = 'STUDIO'; sh.color_type = 'MATERIAL'; sh.show_shadows = True; sh.show_cavity = True
+        sh = sc.display.shading; sh.light = 'STUDIO'; sh.color_type = 'MATERIAL'; sh.show_shadows = False; sh.show_cavity = False   # CPU GL: shadows+cavity cost ~30 s/frame
         sc.render.use_motion_blur = False
     else:
         sc.render.engine = 'CYCLES'
         sc.cycles.device = 'CPU'; sc.cycles.samples = a.samples; sc.cycles.use_adaptive_sampling = True
         sc.cycles.use_denoising = True; sc.cycles.denoiser = 'OPENIMAGEDENOISE'
-        sc.cycles.max_bounces = 12; sc.cycles.transmission_bounces = 12; sc.cycles.glossy_bounces = 3
+        sc.cycles.max_bounces = 8; sc.cycles.glossy_bounces = 3; sc.cycles.transmission_bounces = 6
         sc.cycles.caustics_reflective = False; sc.cycles.caustics_refractive = False
         sc.render.use_motion_blur = not a.no_blur; sc.render.motion_blur_shutter = 0.5
-        sc.render.motion_blur_position = 'START'   # shutter opens at the frame: no smear across cuts
+        sc.render.motion_blur_position = 'START'
 
 
-def build_all():
-    bpy.ops.wm.read_factory_settings(use_empty=True)
-    STREAMS.clear(); GAUGES.clear(); PUMP.clear(); OBJ.clear()
+# ---------------------------------------------------------------- style frames
+def contact_point(ws, side):
+    """World-space contact point of a wheelset's wheel (side -1 left, +1 right) on its rail."""
+    m = ws.matrix_world
+    return m @ Vector((side * RAIL_C, 0, -R0)), (m.to_3x3() @ Vector((0, 1, 0))).normalized(), (m.to_3x3() @ Vector((0, 0, 1))).normalized()
+
+
+def xray_wheels(ws_list, L):
+    """Swap wheel materials to the X-ray look and add a glowing cone-profile outline through each wheel."""
+    for ws in ws_list:
+        for o in spin_of(ws).children:
+            if o.type == 'MESH' and 'Rim' in o.name:
+                o.hide_render = True
+            elif o.type == 'MESH' and any(k in o.name for k in ('Web', 'Hub', 'Axle', 'Disc')):
+                o.data.materials.clear(); o.data.materials.append(L['xray'])
+        for side in (-1, 1):                              # X-ray reveals the cone: an exaggerated glowing rim
+            gr = revolve(f'{ws.name}XCone{side:+d}', wheel_profile(1 / 2.5, side), L['glowO'])
+            gr.matrix_world = ws.matrix_world.copy()
+        for side in ():
+            prof = wheel_profile(ws.get('taper', TAPER_REAL), side)
+            for sgn in (1, -1):
+                pts = [(x, 0.0, sgn * r) for x, r in prof] + [(prof[0][0], 0.0, sgn * prof[0][1])]
+                pts_w = [tuple(ws.matrix_world @ Vector(p)) for p in pts]
+                tube_curve(f'{ws.name}Prof{side:+d}{sgn:+d}', pts_w, 0.012, L['glowO'])
+
+
+def style(name, L):
     sc = bpy.context.scene
-    sc.frame_start, sc.frame_end = 1, fr(T['END'])
-    L = materials.library()
-    build_world(L)
-    build_building(L)
-    build_ruler(L)
-    build_bottle(L)
-    build_streams(L)
-    build_pump(L)
-    animate_pipe_water(L)
-    build_camera()
-    bpy.app.handlers.frame_change_pre.clear()
-    bpy.app.handlers.frame_change_pre.append(on_frame)
-    return L
+    if name in ('hook', 'teaser'):
+        path = set_curve(L, coaches=24)
+        b, ws = SET['A']['bogies'][0]
+        lead = bpy.data.objects[b['wheelsets'][0]]
+        for w in ws:
+            roll(w, 3.1)
+        cp, fwd, up = contact_point(lead, -1)                      # left = inner rail on this left-hand curve
+        Sparks('HookSparks', lambda t: (cp, fwd, up), L, n=90, speed=2.6, size=0.016)
+        p, t, r, u = path.at(SET['A']['hero_s'] + BOGIE_C + 1.28)
+        if name == 'hook':
+            cam = p + t * 1.75 - r * 1.45 + u * 0.42
+            make_camera(cam, cp + up * 0.30 + r * 0.10, lens=24, fstop=4.0, focus=cp + up * 0.3)
+        else:
+            xray_wheels(ws, L)
+            cam = p + t * 2.6 - r * 2.6 + u * 1.05
+            make_camera(cam, p + u * 0.62 - r * 0.2, lens=24, fstop=8.0)
+    elif name == 'wide24':
+        s_front = CURVE_START + CURVE_R * math.radians(CURVE_DEG) + 60 + CURVE_R * math.radians(30)   # loco in the 2nd curve
+        path = set_curve(L, coaches=24, hero_s=s_front - 22.5)
+        p, t, r, u = path.at(s_front + 10)
+        make_camera(p - r * 11 + u * 8.5, path.at(s_front - 190)[0] + u * 1.5, lens=30, fstop=16)
+    elif name == 'cone_close':
+        set_demo(L, taper=1 / 2.5, drift=0.0, section=True, rings=False, xb=0.762)
+        ws = SET['B']['ws']; m = ws.matrix_world
+        taper_marker(ws, 1 / 2.5, L)
+        make_camera(m @ Vector((0.66, -0.95, -0.24)), m @ Vector((0.86, 0, -0.40)), lens=60, fstop=11)
+        fill_light(m @ Vector((0.5, -0.8, -0.35)), m @ Vector((0.86, 0, -0.44)), power=25)
+    elif name == 'cone':
+        set_demo(L, taper=1 / 2.5, drift=0.035, section=True, rings=True, xb=0.762)    # play exaggerated with the taper
+        ws = SET['B']['ws']; m = ws.matrix_world
+        make_camera(m @ Vector((0.0, -3.2, 0.55)), m @ Vector((0.0, 0, -0.12)), lens=28, fstop=11)
+    elif name == 'flange':
+        set_demo(L, taper=TAPER_REAL, drift=0.0068, section=True, rings=False)   # real play ≈ 7 mm: flange face meets the gauge face
+        ws = SET['B']['ws']
+        cp, fwd, up = contact_point(ws, 1)
+        flange_pt = ws.matrix_world @ Vector((XB + 0.030, 0.0, -R0 + 0.006))
+        Sparks('FlangeSparks', lambda t: (flange_pt, -fwd, up), L, n=140, speed=1.3, size=0.0035)
+        m = ws.matrix_world
+        make_camera(m @ Vector((0.62, -1.15, -0.22)), m @ Vector((0.84, 0.0, -0.42)), lens=70, fstop=8)
+        fill_light(m @ Vector((0.5, -0.8, -0.35)), m @ Vector((0.84, 0, -0.44)), power=25)
+        bpy.ops.object.light_add(type='POINT', location=m @ Vector((0.825, -0.06, -0.452)))   # lights the flange throat
+        gl = bpy.context.object; gl.data.energy = 1.5; gl.data.shadow_soft_size = 0.01; gl.visible_camera = False
+    elif name == 'switch':
+        set_turnout(L, u=1.0)
+        ws = build_wheelset('TurnWS', L, discs=True)
+        place_on_turnout(ws, 6.0, diverging=True)
+        o = SET['C']['origin']
+        make_camera(o + Vector((-2.6, -3.2, 1.55)), o + Vector((0.25, 3.0, 0.05)), lens=26, fstop=8)
+    elif name == 'hunting':
+        set_hunting(L, s_now=72.0)
+        D = SET['D']; p, t, r, u = D['path'].at(D['s'])
+        lead = bpy.data.objects[D['bogie']['wheelsets'][0]]
+        cp, fwd, up = contact_point(lead, 1 if D['drift'] > 0 else -1)
+        Sparks('HuntSparks', lambda tt: (cp, fwd, up), L, n=60, speed=2.6)
+        make_camera(p + t * 9.0 + r * 2.0 + u * 5.2, p - t * 3.5 + u * 0.2, lens=24, fstop=11)
+    bpy.app.handlers.frame_change_pre.clear(); bpy.app.handlers.frame_change_pre.append(on_frame)
+
+
+# ================================================================ ANIMATION (shot timeline driven by numeric cues)
+# >>> CUES (generated — numbers only)
+EV = {"XRAY": [7.401, 8.001], "TWENTY": 19.401, "MORPH": 18.485, "HUNT_LABEL": 36.275, "SLAM": 38.367, "DAMPER": 42.216, "NUDGE": 9999.0, "THROW": 9999.0, "CANT": 9999.0, "GRIND": 9999.0}
+SHOTS = [{"name": "H1", "t0": 0.0, "t1": 2.75}, {"name": "H2", "t0": 2.75, "t1": 4.151}, {"name": "H3", "t0": 4.151, "t1": 7.049}, {"name": "H4", "t0": 7.049, "t1": 8.001}, {"name": "P1", "t0": 8.001, "t1": 10.025}, {"name": "P2a", "t0": 10.025, "t1": 11.453}, {"name": "P2b", "t0": 11.453, "t1": 13.902}, {"name": "P3a", "t0": 13.902, "t1": 15.448}, {"name": "P3b", "t0": 15.448, "t1": 16.98}, {"name": "C1", "t0": 16.98, "t1": 19.401}, {"name": "C2", "t0": 19.401, "t1": 21.057}, {"name": "C3", "t0": 21.057, "t1": 22.465}, {"name": "C4a", "t0": 22.465, "t1": 24.75}, {"name": "C4b", "t0": 24.75, "t1": 26.344}, {"name": "C5a", "t0": 26.344, "t1": 28.502}, {"name": "C5b", "t0": 28.502, "t1": 30.149}, {"name": "T1", "t0": 30.149, "t1": 32.077}, {"name": "T2", "t0": 32.077, "t1": 33.968}, {"name": "T3a", "t0": 33.968, "t1": 35.062}, {"name": "T3b", "t0": 35.062, "t1": 36.275}, {"name": "T4", "t0": 36.275, "t1": 37.867}, {"name": "T5a", "t0": 37.867, "t1": 39.578}, {"name": "X3", "t0": 39.578, "t1": 42.1}, {"name": "X1", "t0": 42.1, "t1": 43.02}, {"name": "X2", "t0": 43.02, "t1": 44.167}, {"name": "Z1", "t0": 44.167, "t1": 45.674}, {"name": "M1", "t0": 45.674, "t1": 46.424}, {"name": "M2", "t0": 46.424, "t1": 47.174}, {"name": "M3", "t0": 47.174, "t1": 48.024}, {"name": "Z2", "t0": 48.024, "t1": 49.917}]
+END = 49.916666666666664
+# <<< CUES
+ORG = dict(B=(0, 6000, 0), R=(0, 6100, 0), L=(0, 6200, 0), F=(6000, 6000, 0), C=(6000, 0, 0), D=(-6000, 0, 0),
+           E=(0, -6000, 0), H=(-6000, 6000, 0))
+CUT50 = 'MORPH' in EV          # 50 s cut (word-timed C1 morph, X3 shallow-cone morph, montage); else the 116 s cut
+ALIAS = {'M1': ('C2', 0.45, 1.0), 'M2': ('C5b', 0.2, 1.0), 'M3': ('X2', 0.0, 0.9)}   # montage → (rig shot, from, to)
+V_A = 8.0                      # set-A train speed (m/s)
+V_D = 25.0                     # hunting-set speed (m/s)
+S0_H1 = CURVE_START + 30.0     # hero-coach arc length at frame 1 (lead wheelset well into the canted curve)
+ANIM = {}
+
+
+def shot_at_frame(f):
+    for sh in SHOTS:
+        if int(round(sh['t0'] * FPS)) + 1 <= f < int(round(sh['t1'] * FPS)) + 1:
+            return sh
+    return SHOTS[-1]
+
+
+def eo(u):
+    u = max(0.0, min(1.0, u)); return 1 - (1 - u) ** 3
+
+
+def eio(u):
+    u = max(0.0, min(1.0, u)); return u * u * (3 - 2 * u)
+
+
+def lerp(a, b, u):
+    return a + (b - a) * u
+
+
+# ---------------------------------------------------------------- extra rigs
+def build_cab(L):
+    """Driver desk with two levers + windscreen frame; moved to the loco front each frame."""
+    root = empty('Cab')
+    parts = [box('CabFloor', (-1.62, -2.4, 0.9), (1.62, 0.45, 1.0), L['bogie'], bevel=0.02),
+             box('CabDesk', (-1.45, -0.55, 1.0), (1.45, 0.25, 1.95), L['shell'], bevel=0.06),
+             box('CabDeskTop', (-1.4, -0.52, 1.93), (1.4, 0.22, 1.97), L['bogie'], bevel=0.02),
+             box('CabPanel', (-1.3, 0.05, 1.95), (1.3, 0.35, 2.25), L['stripe'], bevel=0.03),
+             box('CabThrottleSlot', (-0.58, -0.42, 1.96), (-0.32, 0.02, 2.0), L['buffer'], bevel=0.008),
+             pipe('CabThrottle', (-0.45, -0.22, 1.98), (-0.45, -0.12, 2.32), 0.026, L['axle']),
+             sphere('CabThrottleKnob', (-0.45, -0.12, 2.35), 0.07, L['spring']),
+             box('CabBrakeBase', (0.30, -0.32, 1.96), (0.60, -0.02, 2.02), L['buffer'], bevel=0.01),
+             pipe('CabBrake', (0.45, -0.17, 2.0), (0.54, -0.02, 2.30), 0.026, L['axle']),
+             sphere('CabBrakeKnob', (0.55, -0.01, 2.33), 0.07, L['damper'])]
+    for k, x in enumerate((-0.95, 0.95)):
+        g = cyl(f'CabGauge{k}', (x, 0.12, 2.1), 0.11, 0.03, L['dial'] if 'dial' in L else L['shell'], rot=(math.radians(70), 0, 0), bevel=0.005)
+        parts.append(g)
+    for x in (-1.55, 1.55):
+        parts.append(box(f'CabPillar{x:+.1f}', (x - 0.07, 0.35, 1.0), (x + 0.07, 0.45, 3.2), L['loco'], bevel=0.02))
+    parts.append(box('CabTop', (-1.62, 0.3, 3.15), (1.62, 0.5, 3.35), L['loco'], bevel=0.02))
+    for p in parts:
+        p.parent = root
+    for nm, loc in (('CabThrottle', (-0.45, -0.12, 2.35)), ('CabBrake', (0.55, -0.01, 2.33))):
+        anchor(nm, loc).parent = root
+    ANIM['cab'] = root
+
+
+def set_lift(L):
+    """Lift rig: a bogie on straight track; its frame rises off the leading wheelset (exploded view); flange glow rings."""
+    key = 'L'; path = Path([('straight', 40)], origin=ORG['L'], heading_deg=90)
+    build_track(key, path, 0, 40, L)
+    b, ws = build_bogie('LiftBogie', L)
+    place_on_track(b, path, 12.0)
+    lead = bpy.data.objects[b['wheelsets'][0]]
+    # ticks on both wheels (same angle) to show they turn together
+    for side in (-1, 1):
+        t = box(f'LiftTick{side:+d}', (side * 0.94 - 0.008, -0.025, R0 - 0.21), (side * 0.94 + 0.008, 0.025, R0 - 0.02), L['glowO'], bevel=0.004)
+        t.parent = spin_of(lead); t.matrix_parent_inverse = Matrix.Identity(4)
+        fl = [(x, r) for x, r in wheel_profile(TAPER_REAL, side, full=False)[:7]] if side > 0 else None
+    # flange glow: thin ring at the flange tip on each wheel
+    for side in (-1, 1):
+        g = ring(f'LiftFlange{side:+d}', L['glowO'], r=R0 + 0.026, minor=0.012)
+        g.rotation_euler = (0, math.radians(90), 0); g.location = (side * (XB + 0.016), 0, 0); g.parent = spin_of(lead)
+        ANIM.setdefault('flange_glow', []).append(g)
+    frame = [o for o in b.children if o.type != 'EMPTY']
+    ANIM['lift'] = dict(path=path, bogie=b, lead=lead, frame=frame, base={o.name: o.location.copy() for o in frame})
+
+
+def set_topcurve(L):
+    """Set F: tight curve seen from above — measuring lines along both rails, equal-length arcs, an exaggerated
+    wheelset rolling round it."""
+    R = 18.0
+    path = Path([('straight', 6), ('arc', R, 110, +1), ('straight', 6)], origin=ORG['F'], heading_deg=90)
+    build_track('F', path, 0, path.length, L)
+    s_a, s_b = 6 + R * math.radians(15), 6 + R * math.radians(75)
+
+    def line(name, off, s0, s1, mat, r=0.025, lift=RAIL_H + 0.05):
+        pts = []; s = s0
+        while s <= s1 + 1e-6:
+            p, t, rr, up = path.at(s); pts.append(tuple(p + rr * off + up * lift)); s += 0.25
+        o = tube_curve(name, pts, r, mat); return o
+    outer = line('FMeasOut', RAIL_C, s_a, s_b, L['glowO'])       # left-hand curve → right rail is the outer rail
+    inner = line('FMeasIn', -RAIL_C, s_a, s_b, L['glowB'])
+    turn = 2 * math.pi * R0                                         # one wheel turn of rolling
+    # equal arc lengths from the same radial line: angle on each rail = turn / radius
+    ang_out, ang_in = turn / (R + RAIL_C), turn / (R - RAIL_C)
+    s_start = 6 + R * math.radians(30)
+    arc_out = line('FTurnOut', RAIL_C, s_start, s_start + ang_out * R, L['glowO'], r=0.04, lift=RAIL_H + 0.09)
+    arc_in = line('FTurnIn', -RAIL_C, s_start, s_start + ang_in * R, L['glowB'], r=0.04, lift=RAIL_H + 0.09)
+    gap = line('FGap', RAIL_C, s_start + ang_out * R, s_start + ang_in * R, L['spark'], r=0.05, lift=RAIL_H + 0.09)
+    for o in (outer, inner, arc_out, arc_in, gap):
+        o.data.bevel_factor_mapping_end = 'SPLINE'
+    ws = build_wheelset('FWS', L, taper=1 / 2.5, discs=False, xb=0.762)
+    rings = {}
+    for side in (-1, 1):
+        rg = ring(f'FRing{side:+d}', L['glowO'] if side > 0 else L['glowB'], r=1.0, minor=0.02)
+        rg.rotation_euler = (0, math.radians(90), 0); rg.parent = ws; rings[side] = rg
+    ANIM['F'] = dict(path=path, R=R, outer=outer, inner=inner, arc_out=arc_out, arc_in=arc_in, gap=gap, ws=ws, rings=rings,
+                     s_a=s_a, s_b=s_b, s_start=s_start, ang_in=ang_in)
+    for k, (side, s) in enumerate(((1, (s_a + s_b) / 2), (-1, (s_a + s_b) / 2))):
+        p, t, rr, up = path.at(s); anchor('F' + ('outer' if side > 0 else 'inner'), p + rr * side * (RAIL_C + 0.9) + up * 0.3)
+    p, t, rr, up = path.at(s_start + ang_out * R); anchor('Fgap', p + rr * (RAIL_C + 0.8) + up * 0.3)
+
+
+def set_turnout_anim(L):
+    """Turnout with switch rails that slide (rotate about their heels); u(t) = 0 straight, 1 diverging."""
+    C = set_turnout(L, origin=ORG['C'], u=0.5, throw=0.0)            # blades built in their closed shape
+    o = C['origin']
+    piv = {}
+    for nm, side in (('TBladeL', -1), ('TBladeR', 1)):
+        heel_x = (C['xc'](10.0) - RAIL_C) if side < 0 else RAIL_C
+        pv = empty(nm + 'Pivot', (o.x + heel_x, o.y + 10.0, o.z))
+        for suf in ('Foot', 'Head'):
+            ob = bpy.data.objects[nm + suf]; ob.parent = pv; ob.matrix_parent_inverse = pv.matrix_world.inverted()
+        piv[side] = pv
+    bars = [bpy.data.objects[f'TStretch{k}'] for k in range(2)]
+    ANIM['C'] = dict(piv=piv, bars=bars, base=[b.location.copy() for b in bars], throw=0.11, origin=o, xc=C['xc'], hd=C['hd'])
+    ANIM['C']['ws'] = [build_wheelset(f'TWS{k}', L) for k in range(2)]
+
+
+def turnout_state(u):
+    A = ANIM['C']; th = A['throw']
+    A['piv'][-1].rotation_euler = (0, 0, th * (1 - u) / 10.0)        # left blade opens toward +x
+    A['piv'][1].rotation_euler = (0, 0, -th * u / 10.0)              # right blade opens toward −x
+    for b, base, y in zip(A['bars'], A['base'], (0.35, 1.6)):
+        dx = (th * (1 - u) - th * u) * (1 - y / 10.0) / 2
+        b.location = base + Vector((dx, 0, 0))
+
+
+def set_hunting_anim(L):
+    path = Path([('straight', 760)], origin=ORG['D'], heading_deg=90)
+    build_track('D', path, 0, 760, L)
+    b, ws = build_bogie('HuntBogie', L)
+    n = 320
+    tr = tube_curve('HuntTrail', [(0, 0, 0)] * n, 0.05, L['glowO'])
+    ANIM['D'] = dict(path=path, bogie=b, ws=[bpy.data.objects[w] for w in b['wheelsets']], trail=tr, n=n)
+    anchor('Dsubject', (0, 0, 0)).parent = b
+    dm = [o for o in bpy.data.objects if o.name.startswith('HuntBogieDamper') and 'Rod' not in o.name]
+    if dm:
+        anchor('Ddamper', (0, 0, 0)).parent = dm[0]
+
+
+def hunt_amp(t):
+    """Swing amplitude (m) over time: grows from T2, saturates at flange contact, decays once the dampers act (X1)."""
+    t_grow = sh_t0('T2'); t_damp = sh_t0('X1')
+    if t < t_grow:
+        a = 0.002
+    else:
+        rate = math.log(0.0385 / 0.002) / max(1.0, EV['SLAM'] - t_grow) if CUT50 else 0.42
+        a = min(0.0385, 0.002 * math.exp(rate * (t - t_grow)))
+    if t > t_damp:
+        a = max(0.002, a * math.exp(-1.6 * (t - t_damp)))
+    return a
+
+
+def hunt_s(t):
+    return 30.0 + V_D * (t - sh_t0('T1'))
+
+
+def hunt_drift(t):
+    s = hunt_s(t)
+    return hunt_amp(t) * math.sin(2 * math.pi * s / HUNT_L)
+
+
+def set_bank(L):
+    """Cross-section rig: a short piece of track sectioned at the front; it rolls about the inner rail to show cant."""
+    o = Vector(ORG['E'])
+    path = Path([('straight', 30.0)], origin=tuple(o), heading_deg=90)
+    root = empty('BankRoot', o + Vector((-RAIL_C, 0, 0)))
+    before = set(bpy.data.objects.keys())
+    build_track('E', path, 0, 30.0, L, ballast=True)
+    tc = cutter('EFrontCut', (o.x - 5, o.y - 3, -2), (o.x + 5, o.y + 0.4, 2), L['hatchRail'])
+    for nm in set(bpy.data.objects.keys()) - before:
+        ob = bpy.data.objects[nm]
+        if nm.startswith('ERail'):
+            cut(ob, tc)
+        elif nm.startswith('ESleepers') or nm.startswith('EBallast'):
+            cut(ob, tc, keep_material=True)
+        if ob.parent is None and nm != 'BankRoot':
+            ob.parent = root; ob.matrix_parent_inverse = root.matrix_world.inverted()
+    coach = build_coach_body('BankCoach', L)
+    coach.location = o + Vector((0, COACH_L / 2 + 1.2, RAIL_H + R0))   # front end just behind the section plane
+    coach.parent = root; coach.matrix_parent_inverse = root.matrix_world.inverted()
+    for k, off in enumerate((BOGIE_C, -BOGIE_C)):                     # sits on its bogies, not floating
+        b, _ = build_bogie(f'BankBogie{k}', L, damper=False); b.location = (0, off, 0); b.parent = coach
+    # dimension bar on the outer rail: from inner-rail height to outer-rail height
+    bar = box('ECantBar', (-0.025, -0.01, 0), (0.025, 0.01, 1.0), L['glowO'], bevel=0)
+    zl = o.z + RAIL_H + 0.004; x = o.x - RAIL_C - 0.25; k = 0               # level reference: dashed line at inner-rail height
+    while x < o.x + RAIL_C + 0.3:
+        tube_curve(f'ELevelDash{k}', [(x, o.y - 0.06, zl), (min(x + 0.07, o.x + RAIL_C + 0.3), o.y - 0.06, zl)], 0.007, L['dash'])
+        x += 0.12; k += 1
+    ANIM['E'] = dict(root=root, coach=coach, bar=bar, o=o)
+    ac = anchor('Ecant', o + Vector((RAIL_C, 0, RAIL_H + 0.08)))       # outer rail head; rolls with the rig
+    ac.parent = root; ac.matrix_parent_inverse = root.matrix_world.inverted()
+
+
+def bank_state(cant, show_bar):
+    E = ANIM['E']; a = math.atan2(cant, 2 * RAIL_C)
+    E['root'].rotation_euler = (0, -a, 0)                             # roll about the inner (left) rail, outer rail up
+    o = E['o']; xr = o.x + RAIL_C + 0.16
+    E['bar'].location = (xr, o.y - 0.05, o.z + RAIL_H); E['bar'].scale = (1, 1, max(0.001, cant))
+    E['bar'].hide_render = not show_bar
+
+
+def set_split(L):
+    """Split rig: top = steep cone on a tight curve, bottom = shallow cone on a straight (seen from above)."""
+    o = Vector(ORG['H'])
+    pc = Path([('arc', 9.0, 60, +1)], origin=tuple(o + Vector((-4.0, 1.4, 0))), heading_deg=-20)
+    build_track('HC', pc, 0, pc.length, L, ballast=False)
+    ps = Path([('straight', 14)], origin=tuple(o + Vector((-7.0, -1.6, 0))), heading_deg=0)
+    build_track('HS', ps, 0, 14, L, ballast=False)
+    w1 = build_wheelset('HWsteep', L, taper=1 / 2.5, discs=False, xb=0.762)
+    w2 = build_wheelset('HWshallow', L, taper=1 / 12, discs=False, xb=0.762)
+    rings = []
+    for ws, tp in ((w1, 1 / 2.5), (w2, 1 / 12)):
+        for side in (-1, 1):
+            rg = ring(f'{ws.name}Ring{side:+d}', L['glowO'], r=1.0, minor=0.02)
+            rg.rotation_euler = (0, math.radians(90), 0); rg.parent = ws; rings.append((ws, rg, side, tp))
+    trail = tube_curve('HSTrail', [tuple(ps.at(s)[0] + Vector((0, 0, RAIL_H + 0.05))) for s in (1.0, 13.0)], 0.035, L['glowO'])
+    ANIM['H'] = dict(pc=pc, ps=ps, w1=w1, w2=w2, rings=rings, o=o)
+    anchor('Htop', o + Vector((0, 3.6, 0.5))); anchor('Hbottom', o + Vector((0, -3.0, 0.5)))
+
+
+# ---------------------------------------------------------------- per-frame state
+def sh_t0(name):
+    for sh in SHOTS:
+        if sh['name'] == name or sh['name'].rstrip('ab') == name:
+            return sh['t0']
+    return 0.0
+
+
+def train_s(name, t):
+    """Arc length of the hero coach on set A for a shot. H shots and the close share one timeline that loops."""
+    if name in ('H3',):
+        return CURVE_START + CURVE_R * math.radians(CURVE_DEG) + 60 + CURVE_R * math.radians(30) - 22.5 + V_A * (t - sh_t0('H3'))
+    if name.startswith('Z'):
+        return S0_H1 + V_A * (t - END)
+    if name.startswith('P5') or name.startswith('F4'):
+        return S0_H1 + 40 + V_A * (t - sh_t0(name.rstrip('ab')))
+    return S0_H1 + V_A * t
+
+
+def place_train(s):
+    A = SET['A']; path = A['path']
+    for k, (b, ws) in enumerate(A['bogies']):
+        off = BOGIE_C if k == 0 else -BOGIE_C
+        place_on_track(b, path, s + off)
+        for w in ws:
+            roll(w, s + off)
+    place_body(A['body'], path, s)
+    place_body(A['loco'], path, s + 22.5)
+    for k, nm in enumerate(('LocoBogie0', 'LocoBogie1')):
+        place_on_track(bpy.data.objects[nm], path, s + 22.5 + (BOGIE_C - 1.5 if k == 0 else -BOGIE_C + 1.5))
+    for i, o in enumerate(A['insts'], start=1):
+        place_body(o, path, s - 24.0 * i)
+    # cab rig at the loco front
+    p, t, r, u = path.at(s + 22.5 + 13.2)               # ahead of the loco nose (the cab camera stays outside the body)
+    ANIM['cab'].matrix_world = Matrix.Translation(p) @ Matrix((r, t, u)).transposed().to_4x4()
+
+
+def lead_ws():
+    return bpy.data.objects[SET['A']['bogies'][0][0]['wheelsets'][0]]
+
+
+XRAY_OBJS = []
+
+
+def build_xray(L):
+    """X-ray flash: glowing exaggerated cones parented to every hero wheel spin (hidden except during the flash)."""
+    for b, ws in SET['A']['bogies']:
+        for w in ws:
+            for side in (-1, 1):
+                g = revolve(f'{w.name}XCone{side:+d}', wheel_profile(1 / 2.5, side), L['glowO'])
+                g.parent = spin_of(w); XRAY_OBJS.append(g)
+
+
+def set_xray(on, L):
+    for o in XRAY_OBJS:
+        o.hide_render = not on; o.hide_viewport = not on
+    for b, ws in SET['A']['bogies']:
+        for w in ws:
+            for o in spin_of(w).children:
+                if 'Rim' in o.name:
+                    o.hide_render = on
+                elif o.type == 'MESH' and ('Axle' in o.name or 'Disc' in o.name):
+                    o.material_slots[0].material = L['xray'] if on else L['axle']
+
+
+_LAST = {}
+
+
+def changed(key, *vals):
+    """True if a rig's state differs from the last frame (avoids re-evaluating EXACT booleans every frame)."""
+    v = tuple(round(x, 6) if isinstance(x, float) else x for x in vals)
+    if _LAST.get(key) == v:
+        return False
+    _LAST[key] = v; return True
+
+
+def update(t, sh, L):
+    name = sh['name']; base = name.rstrip('ab'); u = (t - sh['t0']) / max(1e-6, sh['t1'] - sh['t0'])
+    # ---- set A train
+    place_train(train_s(base, t))
+    x0, x1 = EV['XRAY']
+    if changed('X', x0 <= t < x1):
+        set_xray(x0 <= t < x1, L)
+    # ---- lift rig (P1, P2, F1)
+    Lr = ANIM['lift']
+    rise = 1.3 * eio((t - sh_t0('P1') - 0.4) / 1.6) if t >= sh_t0('P1') else 0.0
+    if t >= sh_t0('F1') - 0.01 and base.startswith('F1'):
+        rise = 1.3
+    for o in Lr['frame']:
+        o.location = Lr['base'][o.name] + Vector((0, 0, rise))
+    roll(Lr['lead'], 4.0 * max(0.0, t - sh_t0('P2a')) if base.startswith('P2') else 0.0)
+    for g in ANIM['flange_glow']:
+        g.hide_render = not base.startswith('F1')
+    # ---- demo B: cone morph, drift, rings, centring, shallow cone
+    B = SET['B']; morph = 1.0; drift = 0.0; roll_d = 0.0; marker = False
+    if base == 'C1':
+        morph = eio((t - EV['MORPH']) / 0.9) if CUT50 else eio(u * 1.25)
+    elif base == 'C2':
+        marker = t >= EV['TWENTY'] - 0.3
+    elif base == 'C3':
+        drift = 0.035 * eio(u * 1.3)
+    elif base == 'C4':
+        drift = 0.035
+    elif base in ('S1', 'S2'):
+        tn = t - EV['NUDGE']
+        drift = 0.0 if tn < 0 else -0.035 * math.exp(-1.1 * tn) * math.cos(1.7 * tn) * min(1.0, tn / 0.25)
+        roll_d = 1.2 * (t - sh_t0('S1'))
+    elif base == 'X3' and CUT50:                     # steep cone flattens to a shallow one
+        morph = lerp(1.0, 0.25, eio((u - 0.15) * 1.5)); drift = 0.0
+    elif base == 'X3':
+        morph = 0.25; drift = 0.0445 * eio(u * 1.4)
+    tp = morph / 2.5
+    if changed('B', morph, drift, roll_d):
+        for o in spin_of(B['ws']).children:
+            if o.data and getattr(o.data, 'shape_keys', None):
+                o.data.shape_keys.key_blocks['Morph'].value = morph
+        demo_pose('B', drift, tp, roll_dist=roll_d)
+    for o in ANIM.get('marker', []):
+        o.hide_render = not marker
+    # ---- real demo R: flange contact / sideways slide
+    rd = 0.0068
+    if base == 'F3':
+        rd = 0.0068 - 0.004 - 0.004 * math.sin(2 * math.pi * 5.0 * t)        # stick-slip shimmy across the railhead
+    if changed('R', rd):
+        demo_pose('R', rd, TAPER_REAL)
+    # ---- top curve F
+    F = ANIM['F']
+    for k, o in (('outer', F['outer']), ('inner', F['inner'])):
+        o.data.bevel_factor_end = eo((t - sh_t0('P3a')) / 1.6) if base.startswith('P3') else (1.0 if base.startswith('P4') else 0.0)
+        o.hide_render = not (base.startswith('P3') or base.startswith('P4'))
+    for o, delay in ((F['arc_out'], 0.0), (F['arc_in'], 0.0)):
+        o.data.bevel_factor_end = eo((t - sh_t0('P4a') - delay) / 2.0) if base.startswith('P4') else 0.0
+        o.hide_render = not base.startswith('P4')
+    F['gap'].hide_render = not (base.startswith('P4') and t > sh_t0('P4a') + 2.2)
+    sF = 6 + F['R'] * math.radians(20) + (1.6 * (t - sh_t0('C5a')) if base.startswith('C5') else 9.0)
+    dF = 0.035
+    place_on_track(F['ws'], F['path'], sF, drift=dF)
+    roll(F['ws'], sF)
+    for side, rg in F['rings'].items():
+        x = side * RAIL_C - dF; r = tread_r(x, 1 / 2.5); rg.location = (x, 0, 0); rg.scale = (r, r, r)
+        rg.hide_render = not base.startswith('C5')
+    F['ws'].hide_render = False
+    # ---- turnout C
+    uu = 0.0 if t < EV['THROW'] else eio((t - EV['THROW']) / 1.4)
+    if changed('C', uu):
+        turnout_state(uu)
+    yst = (-1.0 + 3.0 * (t - sh_t0('W3'))) if base in ('W3', 'W4') else -6.0
+    for k, w in enumerate(ANIM['C']['ws']):
+        y = yst - 2.56 * k
+        place_on_turnout(w, max(-14.0, y), diverging=True)
+        roll(w, y)
+    # ---- hunting D
+    D = ANIM['D']; sD = hunt_s(t) if t >= sh_t0('T1') else 30.0
+    dD = hunt_drift(t) if t >= sh_t0('T1') else 0.0
+    yaw = (hunt_drift(t + 0.01) - hunt_drift(t - 0.01)) / (0.02 * V_D) if t >= sh_t0('T1') else 0.0
+    place_on_track(D['bogie'], D['path'], sD, drift=dD, yaw=-math.atan(yaw))
+    for w in D['ws']:
+        roll(w, sD)
+    cu = D['trail'].data; sp = cu.splines[0]; n = D['n']
+    for i in range(n):
+        s = sD - 1.5 - 60.0 * (1 - i / (n - 1))
+        tt = t - (sD - s) / V_D
+        dd = hunt_amp(tt) * math.sin(2 * math.pi * s / HUNT_L) if tt >= sh_t0('T2') else 0.0
+        p, tg, r, up = D['path'].at(max(0.0, s))
+        q = p + r * dd * 16.0 + up * (RAIL_H + 0.03)
+        sp.points[i].co = (q.x, q.y, q.z, 1.0)
+    D['trail'].hide_render = not (base.startswith('T') or base in ('X1', 'X2'))
+    glow = 0.0
+    if base in ('X1', 'X2') and t >= EV['DAMPER']:
+        glow = 3.0 + 2.0 * math.sin(2 * math.pi * 2.0 * (t - EV['DAMPER']))
+    L['damper'].node_tree.nodes['Principled BSDF'].inputs['Emission Strength'].default_value = glow
+    L['damper'].node_tree.nodes['Principled BSDF'].inputs['Emission Color'].default_value = (1.0, 0.55, 0.1, 1)
+    # ---- bank E
+    cant = 0.0
+    if base == 'K1':
+        cant = 0.165 * eio((u - 0.15) / 0.75)
+    elif base in ('K2', 'K3'):
+        cant = 0.165
+    if changed('E', cant, base == 'K2'):
+        bank_state(cant, base == 'K2')
+    for o in [ANIM['E']['coach']] + list(ANIM['E']['coach'].children_recursive):
+        o.hide_render = base != 'K3'
+    # ---- split H
+    H = ANIM['H']
+    place_on_track(H['w1'], H['pc'], 2.0 + 1.2 * (t % 6.0), drift=0.035)
+    place_on_track(H['w2'], H['ps'], 3.0 + (2.5 * t) % 8.0, drift=0.0)
+    for ws, rg, side, tp in H['rings']:
+        dr = 0.035 if ws is H['w1'] else 0.0
+        x = side * RAIL_C - dr; r = tread_r(x, tp); rg.location = (x, 0, 0); rg.scale = (r, r, r)
+    for s_ in SPARKS:
+        s_.update(t)
+
+
+# ---------------------------------------------------------------- cameras per shot
+def frame_of(path, s):
+    return path.at(s)
+
+
+def camera_for(name, u, t):
+    base = name.rstrip('ab'); var = name[-1] if name[-1] in 'ab' and base != name else ''
+    A = SET['A']; pa = A['path']
+    if base in ('H1', 'H2', 'H4', 'P5', 'F4', 'Z1', 'Z2'):
+        lw = lead_ws(); cp, fwd, up = contact_point(lw, -1)
+        s_lead = train_s(base, t) + BOGIE_C + 1.28
+        p, tg, r, uu = pa.at(s_lead)
+    if base == 'H1':
+        return p + tg * (1.75 - 0.25 * u) - r * 1.45 + uu * 0.42, cp + up * 0.30 + r * 0.10, 24, 4.0
+    if base == 'H2':
+        c = ANIM['cab'].matrix_world
+        return c @ Vector((0.0, -2.25 + 0.2 * u, 3.05)), c @ Vector((0.0, 0.4, 2.05)), 18, 8.0
+    if base == 'H3':
+        sf = train_s('H3', t) + 22.5
+        p3, t3, r3, u3 = pa.at(sf + 10)
+        return p3 - r3 * (11 + 2 * u) + u3 * (8.5 + 3 * u), pa.at(sf - 190)[0] + u3 * 1.5, 30, 16
+    if base == 'H4':
+        bp = A['bogies'][0][0].matrix_world.translation
+        return lerp(p + tg * 5.5 - r * 4.0 + uu * 3.2, p + tg * 2.8 - r * 2.4 + uu * 1.1, eio(u)), lerp(bp, cp + uu * 0.45, eio(u)), 24, 8.0
+    if base == 'P1':
+        Lr = ANIM['lift']; c = Lr['lead'].matrix_world.translation; a = math.radians(-50 + 40 * u)
+        return c + Vector((math.cos(a) * 4.2, math.sin(a) * 4.2 - 1.0, 2.4)), c + Vector((0, 0, 0.6)), 30, 8.0
+    if base == 'P2':
+        c = ANIM['lift']['lead'].matrix_world.translation
+        if var == 'a':
+            return c + Vector((2.6 - 0.3 * u, -2.8, 1.4)), c, 30, 8.0
+        return c + Vector((0.0, -0.15, 3.6 - 0.4 * u)), c, 30, 11.0
+    if base == 'P3':
+        F = ANIM['F']; pc = F['path'].at((F['s_a'] + F['s_b']) / 2)[0]
+        return pc + Vector((0, 0, 22 - 3 * u)) + (Vector((0, -0.5, 0)) if var == 'a' else Vector((4, -6, -6))), pc, 35, 16
+    if base == 'P4':
+        F = ANIM['F']; pc = F['path'].at(F['s_start'] + 1.5)[0]
+        z = 9.0 - 1.5 * u
+        return pc + Vector((0, -0.1, z)) + (Vector() if var == 'a' else Vector((1.5, -2.5, -2.0))), pc, 35, 16
+    if base == 'P5':
+        if var == 'a':
+            return p - tg * 1.2 - r * 1.25 + uu * 0.35, cp + up * 0.18, 30, 3.5
+        return cp + fwd * 0.9 + r * 0.55 + up * 0.22, cp + up * 0.03, 50, 4.0
+    if base in ('C1', 'C2', 'C3', 'C4', 'S1', 'S2', 'X3'):
+        m = SET['B']['ws'].matrix_world
+        if base == 'C1':
+            return m @ Vector((-0.6 + 0.9 * u, -2.6, 0.6)), m @ Vector((0.4, 0, -0.1)), 35, 11
+        if base == 'C2':
+            return m @ Vector((0.66, -0.95 + 0.08 * u, -0.24)), m @ Vector((0.86, 0, -0.40)), 60, 11
+        if base in ('C3', 'S1', 'X3'):                     # wheelset kept in the upper frame
+            return m @ Vector((0.0, -3.2 + 0.2 * u, 0.80)), m @ Vector((0.0, 0, -0.50)), 28, 11
+        if base == 'C4':
+            if var == 'a':
+                return m @ Vector((-0.4 + 0.3 * u, -3.0, 0.95)), m @ Vector((0.0, 0, -0.48)), 28, 11
+            sd = -1 if CUT50 else 1                       # 50 s cut: the inner wheel
+            return m @ Vector((sd * 1.35, -1.6 + 0.2 * u, 0.15)), m @ Vector((sd * 0.85, 0, -0.25)), 40, 11
+        if base == 'S2':
+            if var == 'a':
+                return m @ Vector((0.0, -3.0, 0.80)), m @ Vector((0.0, 0, -0.50)), 28, 11
+            return m @ Vector((0.0, -0.6, 2.4)), m @ Vector((0.0, 0.25, -0.1)), 28, 11
+    if base == 'C5':
+        F = ANIM['F']; c = F['ws'].matrix_world.translation
+        if var == 'a':
+            return c + Vector((-1.4, -2.6, 3.0)), c, 30, 11
+        return c + Vector((0.0, -0.3, 3.6)), c, 30, 11
+    if base == 'F1':
+        c = ANIM['lift']['lead'].matrix_world.translation; a = math.radians((-70 if var == 'a' else 20) + 30 * u)
+        return c + Vector((math.cos(a) * 3.0, math.sin(a) * 3.0, 1.2)), c, 35, 8.0
+    if base in ('F2', 'F3'):
+        m = SET['R']['ws'].matrix_world
+        if base == 'F2' and var == 'b':
+            return m @ Vector((0.45, -0.6, -0.30)), m @ Vector((0.84, 0.0, -0.44)), 80, 8
+        if base == 'F3':
+            return m @ Vector((0.66, -0.95, -0.24)), m @ Vector((0.86, 0, -0.42)), 60, 11
+        return m @ Vector((0.62, -1.15, -0.22)), m @ Vector((0.84, 0.0, -0.42)), 70, 8
+    if base == 'F4':
+        return lerp(p - tg * 1.5 - r * 1.6 + uu * 0.6, p - tg * 6.0 - r * 5.5 + uu * 2.6, eio(u)), cp + uu * 0.5, 26, 8
+    if base in ('K1', 'K2', 'K3'):
+        o = ANIM['E']['o']
+        if base == 'K3':
+            return o + Vector((5.6 - 0.5 * u, -3.2 + 0.6 * u, 0.9)), o + Vector((-0.4, 9.0, 1.2)), 26, 16
+        return o + Vector((0.15, -3.9 + 0.3 * u, 0.42)), o + Vector((0.15, 0, -0.32)), 26, 16
+    if base in ('W1', 'W2', 'W3', 'W4'):
+        o = ANIM['C']['origin']
+        if base in ('W1', 'W2'):
+            return o + Vector((0.2, 1.0 - 0.6 * u, 9.0 - 1.0 * u)), o + Vector((0.2, 2.0, 0)), 35, 16
+        w = ANIM['C']['ws'][0].matrix_world.translation
+        if base == 'W3':
+            return o + Vector((-2.6, -3.2, 1.55)), w + Vector((0.3, 2.0, -0.95)), 26, 8
+        return w + Vector((-3.0, -4.5, 2.6)), w + Vector((0.5, 2.0, -1.1)), 28, 8
+    if base in ('T1', 'T2', 'T3', 'T4', 'T5', 'X1', 'X2'):
+        D = ANIM['D']; sD = hunt_s(t); p, tg, r, uu = D['path'].at(sD); bpos = D['bogie'].matrix_world.translation
+        if base == 'T1':
+            return p + tg * 3.5 - r * 2.2 + uu * 0.5, bpos + uu * 0.1, 24, 6
+        if base in ('T2', 'T3', 'T4'):
+            if var == 'b' or base in ('T4', 'T2'):
+                return p + tg * 9.0 + r * 2.0 + uu * 5.2, p + tg * 2.0 - uu * 0.8, 24, 11
+            return p - tg * 1.0 + r * 0.8 + uu * 8.5, p - tg * 7.0, 24, 16
+        if base == 'T5':
+            sh = Vector((math.sin(t * 61) * 0.05, math.sin(t * 47) * 0.04, math.sin(t * 53) * 0.03)) * min(1.0, hunt_amp(t) / 0.03)
+            if var == 'a':
+                return p - tg * 2.0 - r * 1.6 + uu * 0.45 + sh, bpos - uu * 0.3, 24, 5
+            return p + tg * 6.0 + r * 1.6 + uu * 3.5 + sh, bpos - uu * 0.9, 24, 8
+        if base == 'X1':
+            return p + tg * 2.2 + r * 2.6 + uu * 1.4, bpos + r * 1.3 + uu * 0.2, 30, 5
+        if base == 'X2':
+            return p + tg * 9.0 + r * 2.0 + uu * 5.2, p + tg * 2.0 - uu * 0.8, 24, 11
+    if base == 'X4':
+        o = ANIM['H']['o']
+        if var == 'a':
+            return o + Vector((0.0, -1.8, 10.5)), o + Vector((0.0, -1.2, 0)), 30, 16
+        return o + Vector((0.0, -7.5, 6.5)), o + Vector((0.0, -0.6, 0)), 30, 16
+    if base == 'Z1':
+        return p + tg * 14 - r * 22 + uu * 9.0, A['body'].matrix_world.translation + uu * 1.0, 30, 16
+    if base == 'Z2':
+        e = eio(u)
+        c0 = p + tg * 6.0 - r * 7.0 + uu * 4.0; c1 = p + tg * 1.75 - r * 1.45 + uu * 0.42
+        g0 = A['body'].matrix_world.translation; g1 = cp + up * 0.30 + r * 0.10
+        return lerp(c0, c1, e), lerp(g0, g1, e), lerp(30, 24, e), 4.0
+    return Vector((0, -10, 5)), Vector((0, 0, 0)), 35, 8
+
+
+def build_all(L):
+    set_curve(L, coaches=24, hero_s=S0_H1)
+    build_cab(L)
+    build_xray(L)
+    set_demo(L, origin=ORG['B'], taper=0.0, morph_taper=1 / 2.5, xb=0.762, key='B', section=True, rings=True)
+    taper_marker(SET['B']['ws'], 1 / 2.5, L)
+    ANIM['marker'] = [o for o in bpy.data.objects if o.name.startswith(('RefDash', 'TaperLine', 'TaperArc'))]
+    anchor('Btaper', SET['taper_label'])
+    for side in (-1, 1):
+        a_ = anchor(f'Bring{side:+d}', (side * RAIL_C, 0, R0 + 0.07)); a_.parent = SET['B']['ws']
+    set_demo(L, origin=ORG['R'], taper=TAPER_REAL, drift=0.0068, xb=XB, key='R', section=True, rings=False, ticks=False)
+    set_lift(L)
+    set_topcurve(L)
+    set_turnout_anim(L)
+    set_hunting_anim(L)
+    set_bank(L)
+    set_split(L)
+    # sparks
+    lw = lead_ws()
+    Sparks('HookSparks', lambda t: contact_point(lead_ws(), -1), L, n=130, speed=2.6, size=0.010)
+    Rws = SET['R']['ws']
+    Sparks('FlangeSparks', lambda t: (Rws.matrix_world @ Vector((XB + 0.030, 0.0, -R0 + 0.006)),
+                                      -(Rws.matrix_world.to_3x3() @ Vector((0, 1, 0))), Vector((0, 0, 1))), L, n=140, speed=1.3, size=0.0035)
+    Sparks('HuntSparks', lambda t: contact_point(ANIM['D']['ws'][0], 1 if hunt_drift(t) > 0 else -1), L, n=70, speed=2.8, size=0.014)
+    SPARK_ON.update(HookSparks=('H1', 'H4', 'P5', 'F4', 'Z2'), FlangeSparks=('F2', 'F3'), HuntSparks=('T5',))
+    bpy.app.handlers.frame_change_pre.clear(); bpy.app.handlers.frame_change_pre.append(frame_handler)
+
+
+SPARK_ON = {}
+LIB = {}
+
+
+def frame_handler(scene, depsgraph=None):
+    t = (scene.frame_current + scene.frame_subframe - 1) / FPS
+    f = scene.frame_current
+    sh = shot_at_frame(f); ANIM['shot'] = sh['name']
+    if sh['name'] in ALIAS:                               # montage: show another shot's rig at a mapped time
+        rig, a0, a1 = ALIAS[sh['name']]; u = (t - sh['t0']) / max(1e-6, sh['t1'] - sh['t0'])
+        sh = next(x for x in SHOTS if x['name'] == rig)
+        t = sh['t0'] + (sh['t1'] - sh['t0']) * (a0 + (a1 - a0) * u)
+    base = sh['name'].rstrip('ab')
+    for sp in SPARKS:
+        allowed = SPARK_ON.get(sp.name, ())
+        sp.t_on, sp.t_off = (-1e9, 1e9) if base in allowed else (1e9, 1e9)
+        if sp.name == 'HuntSparks':
+            sp.t_on, sp.t_off = ((-1e9, 1e9) if base in allowed and hunt_amp(t) > 0.03 else (1e9, 1e9))
+    update(t, sh, LIB['L'])
+    loc, tgt, lens, fs = camera_for(sh['name'], (t - sh['t0']) / max(1e-6, sh['t1'] - sh['t0']), t)
+    cam = scene.camera; ct = bpy.data.objects['CamTarget']; cf = bpy.data.objects['CamFocus']
+    cam.location = loc; ct.location = tgt; cf.location = tgt; cam.data.lens = lens; cam.data.dof.aperture_fstop = fs
 
 
 def export_anchors(path):
-    """Per-frame normalized screen positions (x right, y down) of label anchors, for post overlays."""
     from bpy_extras.object_utils import world_to_camera_view
-    sc = bpy.context.scene; cam = sc.camera
+    sc = bpy.context.scene; out = {'fps': FPS, 'frames': {}}
     names = [o for o in bpy.data.objects if o.name.startswith('A_')]
-    out = {'fps': FPS, 'frames': {}, 'gauges': GAUGES, 'timeline': T,
-           'pump': {'drop': PUMP_DROP, 'land': PUMP_LAND, 'shower_full': SHOWER_FULL}}
-    for f in range(1, fr(T['END']) + 1):
-        sc.frame_set(f)
-        row = {}
+    for f in range(1, int(round(END * FPS)) + 1):
+        sc.frame_set(f); row = {'shot': ANIM['shot']}
         for o in names:
-            v = world_to_camera_view(sc, cam, o.matrix_world.translation)
+            v = world_to_camera_view(sc, sc.camera, o.matrix_world.translation)
             row[o.name[2:]] = [round(v.x, 4), round(1 - v.y, 4), round(v.z, 3)]
         out['frames'][f] = row
-    with open(path, 'w') as fh:
-        json.dump(out, fh)
+    json.dump(out, open(path, 'w'))
+
+
+# ---------------------------------------------------------------- main
+def parse_args():
+    argv = sys.argv[sys.argv.index('--') + 1:] if '--' in sys.argv else sys.argv[1:]
+    p = argparse.ArgumentParser()
+    p.add_argument('--style', default=None)
+    p.add_argument('--frames', default='1')
+    p.add_argument('--res', default='540x960')
+    p.add_argument('--samples', type=int, default=48)
+    p.add_argument('--engine', default='CYCLES', choices=['CYCLES', 'WORKBENCH'])
+    p.add_argument('--out', default='frames')
+    p.add_argument('--no-blur', action='store_true')
+    p.add_argument('--before', action='store_true')
+    p.add_argument('--anchors', default=None)
+    a = p.parse_args(argv)
+    a.w, a.h = (int(x) for x in a.res.lower().split('x'))
+    return a
 
 
 def main():
     a = parse_args()
-    build_all()
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    SPARKS.clear(); OBJ.clear(); SET.clear()
+    L = materials.train_library(materials.library())
+    build_world(L)
     setup_render(a)
     sc = bpy.context.scene
-    sc.render.resolution_x, sc.render.resolution_y = a.w, a.h
-    if a.anchors:
-        export_anchors(a.anchors); return
     os.makedirs(a.out, exist_ok=True)
-    sc.render.filepath = os.path.join(os.path.abspath(a.out), 'before_' if a.before else 'frame_')
-    if a.range:
-        sc.frame_start, sc.frame_end = a.range
-        bpy.ops.render.render(animation=True)
-    else:
-        for f in a.frame_list:
-            sc.frame_start = sc.frame_end = f
+    LIB['L'] = L
+    if not a.style:
+        build_all(L)
+        make_camera((0, -10, 5), (0, 0, 0))
+        sc.frame_start, sc.frame_end = 1, int(round(END * FPS))
+        if a.anchors:
+            export_anchors(a.anchors); return
+        sc.render.filepath = os.path.join(os.path.abspath(a.out), 'before_' if a.before else 'frame_')
+        if '-' in a.frames and ',' not in a.frames:
+            s0, s1 = (int(x) for x in a.frames.split('-')); sc.frame_start, sc.frame_end = s0, s1
             bpy.ops.render.render(animation=True)
+        else:
+            for f in (int(x) for x in a.frames.split(',')):
+                sc.frame_start = sc.frame_end = f; bpy.ops.render.render(animation=True)
+        return
+    if a.style:
+        style(a.style, L)
+        sc.render.use_motion_blur = False
+        sc.frame_set(12)
+        on_frame(sc)
+        sc.render.filepath = os.path.join(os.path.abspath(a.out), f'style_{a.style}.png')
+        bpy.ops.render.render(write_still=True)
+        # projected anchor points for the post labels
+        from bpy_extras.object_utils import world_to_camera_view
+        anchors = {}
+        if a.style in ('cone', 'cone_close'):
+            ws = SET['B']['ws']; m = ws.matrix_world; tp = SET['B']['taper']
+            anchors['taper'] = SET.get('taper_label', m @ Vector((0.93, 0, -(R0 - (0.93 - RAIL_C) * tp) + 0.05)))
+            anchors['subject'] = m @ Vector((0.0, 0, -R0))
+            for side in (-1, 1):
+                anchors[f'ring{side:+d}'] = m @ Vector((side * RAIL_C, 0, R0 + 0.06))
+        if a.style == 'hunting':
+            anchors['subject'] = SET['D']['bogie'].matrix_world.translation
+        if a.style == 'switch':
+            anchors['subject'] = SET['C']['origin'] + Vector((0, 2.0, 0))
+        for k, v in anchors.items():
+            c = world_to_camera_view(sc, sc.camera, v); anchors[k] = [round(c.x, 4), round(1 - c.y, 4)]
+        json.dump(anchors, open(os.path.join(a.out, f'style_{a.style}.json'), 'w'))
 
 
 if __name__ == '__main__':

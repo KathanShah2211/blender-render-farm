@@ -1,4 +1,4 @@
-"""Shared material library — stylized technical-cutaway look.
+"""Shared material library — stylized technical-cutaway look (trains set added).
 
 Matte painted metals, warm wood, sandy ground, translucent plastic/water,
 and the orange diagonal-hatch material used on every boolean cut face.
@@ -107,6 +107,59 @@ def wet_film(name='WetFilm'):
     if hasattr(m, 'surface_render_method'):
         m.surface_render_method = 'BLENDED'
     return m
+
+
+def emissive(name, color, strength=4.0):
+    m = _principled(name, color, rough=0.5, **{'Emission Color': _srgb(color), 'Emission Strength': strength})
+    return m
+
+
+def xray(name='XRay', color='#7FC4E8'):
+    """See-through 'X-ray' wheel: fresnel-edged translucent blue."""
+    m = bpy.data.materials.new(name); m.use_nodes = True; nt = m.node_tree
+    out = nt.nodes.get('Material Output'); bsdf = nt.nodes.get('Principled BSDF'); nt.nodes.remove(bsdf)
+    tr = nt.nodes.new('ShaderNodeBsdfTransparent'); em = nt.nodes.new('ShaderNodeEmission')
+    em.inputs['Color'].default_value = _srgb(color); em.inputs['Strength'].default_value = 2.5
+    lw = nt.nodes.new('ShaderNodeLayerWeight'); lw.inputs['Blend'].default_value = 0.35
+    mix = nt.nodes.new('ShaderNodeMixShader')
+    nt.links.new(lw.outputs['Facing'], mix.inputs['Fac']); nt.links.new(tr.outputs['BSDF'], mix.inputs[1])
+    nt.links.new(em.outputs['Emission'], mix.inputs[2]); nt.links.new(mix.outputs['Shader'], out.inputs['Surface'])
+    m.diffuse_color = (*_srgb(color)[:3], 0.3)
+    return m
+
+
+def train_library(L):
+    L['railHead'] = _principled('RailHead', '#C9CED3', rough=0.22, metal=0.9)
+    L['rail'] = _principled('RailWeb', '#6B4A36', rough=0.75, metal=0.3)
+    _noise_mix(L['rail'], '#5E3F2D', '#7C5840', scale=14.0, bump=0.1)
+    L['sleeper'] = _principled('Sleeper', '#BDB6AC', rough=0.75)
+    _noise_mix(L['sleeper'], '#B2AA9F', '#C8C1B6', scale=9.0, bump=0.08)
+    L['ballast'] = _principled('Ballast', '#8C8780', rough=0.85)
+    _noise_mix(L['ballast'], '#6F6A63', '#A39E96', scale=40.0, detail=2.0, bump=0.35)
+    L['wheel'] = _principled('WheelSteel', '#9AA3AB', rough=0.35, metal=0.85)
+    L['tread'] = _principled('Tread', '#D4D9DD', rough=0.18, metal=0.95)
+    L['axle'] = _principled('Axle', '#7C858E', rough=0.4, metal=0.8)
+    L['bogie'] = _principled('BogieFrame', '#2B3440', rough=0.5, metal=0.2)
+    L['spring'] = _principled('Spring', '#E2673A', rough=0.45, metal=0.2)
+    L['damper'] = _principled('Damper', '#F2B632', rough=0.45, metal=0.1)
+    L['shell'] = _principled('CoachShell', '#E9E6E0', rough=0.35, metal=0.3)
+    L['stripe'] = _principled('CoachStripe', '#1E3246', rough=0.4)
+    L['stripe2'] = _principled('CoachStripe2', '#E2673A', rough=0.4)
+    L['window'] = _principled('CoachWindow', '#24323F', rough=0.08, **{'Coat Weight': 0.8})
+    L['roof'] = _principled('CoachRoof', '#9097A0', rough=0.5, metal=0.4)
+    L['loco'] = _principled('Loco', '#C8442E', rough=0.45, metal=0.1)
+    L['glowO'] = emissive('GlowOrange', '#E2673A', 6.0)
+    L['glowB'] = emissive('GlowBlue', '#7FC4E8', 4.0)
+    L['spark'] = emissive('Spark', '#FFB347', 40.0)
+    L['xray'] = xray()
+    L['machine'] = _principled('PointMachine', '#3E8FC2', rough=0.5, metal=0.1)
+    L['hatchRail'] = hatch('CutHatchRail', base='#4A5868', stripe='#2B3644')
+    L['dash'] = emissive('DashNavy', '#1E3246', 0.0)
+    L['cream'] = _principled('Cream', '#EADFC8', rough=0.45)
+    L['pantograph'] = _principled('Panto', '#3A3F45', rough=0.5, metal=0.6)
+    L['buffer'] = _principled('Buffer', '#1C1F23', rough=0.6)
+    L['acunit'] = _principled('ACUnit', '#B9BEC4', rough=0.5, metal=0.3)
+    return L
 
 
 def library():
