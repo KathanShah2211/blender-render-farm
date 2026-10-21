@@ -894,7 +894,8 @@ END = 49.916666666666664
 # <<< CUES
 ORG = dict(B=(0, 6000, 0), R=(0, 6100, 0), L=(0, 6200, 0), F=(6000, 6000, 0), C=(6000, 0, 0), D=(-6000, 0, 0),
            E=(0, -6000, 0), H=(-6000, 6000, 0))
-CUT50 = 'MORPH' in EV          # 50 s cut (word-timed C1 morph, X3 shallow-cone morph, montage); else the 116 s cut
+CUT50 = 'MORPH' in EV
+JUNCTION_HOLD = 0.3            # 50 s cut: the end dolly lands this long before the loop point and holds the H1 pose          # 50 s cut (word-timed C1 morph, X3 shallow-cone morph, montage); else the 116 s cut
 ALIAS = {'M1': ('C2', 0.45, 1.0), 'M2': ('C5b', 0.2, 1.0), 'M3': ('X2', 0.0, 0.9)}   # montage → (rig shot, from, to)
 V_A = 8.0                      # set-A train speed (m/s)
 V_D = 25.0                     # hunting-set speed (m/s)
@@ -1441,6 +1442,12 @@ def camera_for(name, u, t):
         return o + Vector((0.0, -7.5, 6.5)), o + Vector((0.0, -0.6, 0)), 30, 16
     if base == 'Z1':
         return p + tg * 14 - r * 22 + uu * 9.0, A['body'].matrix_world.translation + uu * 1.0, 30, 16
+    if base == 'Z2' and CUT50:
+        H1 = SHOTS[0]; uh = (t - END) / (H1['t1'] - H1['t0'])            # H1's own (slow) camera drift, extrapolated
+        cH = p + tg * (1.75 - 0.25 * uh) - r * 1.45 + uu * 0.42; gH = cp + up * 0.30 + r * 0.10
+        e = eio((t - sh_t0('Z2')) / max(0.5, END - JUNCTION_HOLD - sh_t0('Z2')))
+        c0 = p + tg * 3.6 - r * 3.4 + uu * 1.9; g0 = cp + up * 0.55 + r * 0.10
+        return lerp(c0, cH, e), lerp(g0, gH, e), lerp(30, 24, e), 4.0
     if base == 'Z2':
         e = eio(u)
         c0 = (p + tg * 3.6 - r * 3.4 + uu * 1.9) if CUT50 else (p + tg * 6.0 - r * 7.0 + uu * 4.0)   # shorter push: less smear
@@ -1478,10 +1485,29 @@ def build_all(L):
     Sparks('HuntSparks', lambda t: contact_point(ANIM['D']['ws'][0], 1 if hunt_drift(t) > 0 else -1), L, n=110, speed=3.0, size=0.02)
     SPARK_ON.update(HookSparks=('H1', 'H4', 'P5', 'F4', 'Z2'), FlangeSparks=('F2', 'F3'), HuntSparks=('T5',))
     bpy.app.handlers.frame_change_pre.clear(); bpy.app.handlers.frame_change_pre.append(frame_handler)
+    bpy.app.handlers.render_pre.clear(); bpy.app.handlers.render_pre.append(shutter_pre)
 
 
 SPARK_ON = {}
 LIB = {}
+
+
+def junction_weight(t):
+    """1 at the loop point, 0 away from it: ramps up over the last 0.8 s (full for the 0.3 s hold) and back down
+    over the first 0.6 s, so frame N and frame 1 share the same sharp settings."""
+    if t >= END - JUNCTION_HOLD:
+        return 1.0
+    if t >= END - JUNCTION_HOLD - 0.5:
+        return eio((t - (END - JUNCTION_HOLD - 0.5)) / 0.5)
+    if t < 0.6:
+        return 1.0 - eio(t / 0.6)
+    return 0.0
+
+
+def shutter_pre(scene, depsgraph=None):
+    """Per-frame shutter: 0.5 normally, 0.15 across the loop point (set before each frame renders)."""
+    t = (scene.frame_current - 1) / FPS
+    scene.render.motion_blur_shutter = lerp(0.5, 0.15, junction_weight(t)) if CUT50 else 0.5
 
 
 def frame_handler(scene, depsgraph=None):
@@ -1499,9 +1525,17 @@ def frame_handler(scene, depsgraph=None):
         if sp.name == 'HuntSparks':
             sp.t_on, sp.t_off = ((-1e9, 1e9) if base in allowed and hunt_amp(t) > 0.03 else (1e9, 1e9))
     update(t, sh, LIB['L'])
+    bpy.context.view_layer.update()                        # fresh matrix_world for child objects before aiming the camera
     loc, tgt, lens, fs = camera_for(sh['name'], (t - sh['t0']) / max(1e-6, sh['t1'] - sh['t0']), t)
+    w = junction_weight(t) if CUT50 and base in ('H1', 'Z2') else 0.0
+    fs = lerp(fs, 7.0, w)                                  # sharper (deeper focus) across the loop point
     cam = scene.camera; ct = bpy.data.objects['CamTarget']; cf = bpy.data.objects['CamFocus']
     cam.location = loc; ct.location = tgt; cf.location = tgt; cam.data.lens = lens; cam.data.dof.aperture_fstop = fs
+    for sp in SPARKS:                                      # sparks never balloon right in front of the lens
+        for d, *_ in sp.p:
+            k = max(0.0, min(1.0, ((d.location - loc).length - 0.5) / 0.6))
+            if k < 1.0:
+                d.scale = tuple(v * k for v in d.scale)
 
 
 def export_anchors(path):
