@@ -36,15 +36,9 @@ OBJ = {}; ANIM = {}; LIB = {}
 
 # ---------------------------------------------------------------- provisional timeline (beat sheet estimate)
 # Re-timed later from the final audio (timing.py → inject_cues.py).
-EV = {"BHOOKAMP": 34.6}
-SHOTS = [{"name": "H1", "t0": 0.0, "t1": 2.3}, {"name": "H2", "t0": 2.3, "t1": 4.2}, {"name": "N1", "t0": 4.2, "t1": 7.0},
-         {"name": "N2", "t0": 7.0, "t1": 9.8}, {"name": "P1", "t0": 9.8, "t1": 11.9}, {"name": "P2", "t0": 11.9, "t1": 14.2},
-         {"name": "P3", "t0": 14.2, "t1": 17.2}, {"name": "A1", "t0": 17.2, "t1": 19.5}, {"name": "A2", "t0": 19.5, "t1": 22.4},
-         {"name": "A3", "t0": 22.4, "t1": 25.2}, {"name": "W1", "t0": 25.2, "t1": 27.6}, {"name": "W2", "t0": 27.6, "t1": 30.5},
-         {"name": "W3", "t0": 30.5, "t1": 33.0}, {"name": "T1", "t0": 33.0, "t1": 35.8}, {"name": "T2", "t0": 35.8, "t1": 38.2},
-         {"name": "T3", "t0": 38.2, "t1": 40.3}, {"name": "Y1", "t0": 40.3, "t1": 44.2}, {"name": "Z1", "t0": 44.2, "t1": 46.4},
-         {"name": "Z2", "t0": 46.4, "t1": 50.0}]
-END = 50.0
+EV = {"QUAKE": 37.68}
+SHOTS = [{"name": "H1", "t0": 0.0, "t1": 1.44}, {"name": "H2", "t0": 1.44, "t1": 3.43}, {"name": "N1", "t0": 3.43, "t1": 4.87}, {"name": "N1b", "t0": 4.87, "t1": 8.05}, {"name": "N2", "t0": 8.05, "t1": 10.07}, {"name": "P1", "t0": 10.07, "t1": 11.95}, {"name": "P2", "t0": 11.95, "t1": 15.11}, {"name": "P3", "t0": 15.11, "t1": 18.74}, {"name": "A1", "t0": 18.74, "t1": 21.06}, {"name": "A2", "t0": 21.06, "t1": 24.02}, {"name": "A2b", "t0": 24.02, "t1": 25.34}, {"name": "A3", "t0": 25.34, "t1": 27.4}, {"name": "W1", "t0": 27.4, "t1": 28.66}, {"name": "W2", "t0": 28.66, "t1": 32.94}, {"name": "W2b", "t0": 32.94, "t1": 34.04}, {"name": "W3", "t0": 34.04, "t1": 35.62}, {"name": "T1", "t0": 35.62, "t1": 39.32}, {"name": "T2", "t0": 39.32, "t1": 42.18}, {"name": "T3", "t0": 42.18, "t1": 43.41}, {"name": "Y1", "t0": 43.41, "t1": 47.18}, {"name": "Z1", "t0": 47.18, "t1": 48.88}, {"name": "Z2", "t0": 48.88, "t1": 52.333}]
+END = 52.333333333333336
 JUNCTION_HOLD = 0.3
 
 
@@ -453,6 +447,7 @@ def set_value(mat, node, v):
 
 def update(t, sh):
     n = sh['name']; u = (t - sh['t0']) / max(1e-6, sh['t1'] - sh['t0']); L = LIB['L']
+    full = n; n = n[:-1] if n.endswith('b') else n      # split shots (N1b, A2b, W2b) share their base shot's set state
     building = n in ('P1', 'P2', 'P3')
     grow = 0.0 if n in ('P1', 'P2') else (eio(min(1.0, u / 0.85)) if n == 'P3' else 1.0)
     for p in OBJ['panels']:                                  # panels appear from the banks inwards
@@ -461,7 +456,7 @@ def update(t, sh):
     for o in OBJ['archPiers']:
         show(o, not building)
     tr = OBJ['train']; show(tr, not building and n not in ('T2', 'T3'))
-    s = train_front(n, t, sh['t0']); tr.location = (s, 0, DECK); ANIM['train_c'] = s - ANIM['train_len'] / 2
+    s = train_front(full if full in TRAIN_S0 else n, t, sh['t0']); tr.location = (s, 0, DECK); ANIM['train_c'] = s - ANIM['train_len'] / 2
     # Eiffel silhouette: hook + fades back in during the return to the hook pose
     fe = 1.0 if n == 'H1' else (eio((u - 0.35) / 0.4) if n == 'Z2' else 0.0)
     show(OBJ['eiffel'], fe > 0.001); set_value(L['eiffel'], 'Fade', fe)
@@ -533,16 +528,19 @@ def h1_pose(t):
 
 CAMS = {   # name: (loc0, tgt0, lens0, loc1, tgt1, lens1)
     'H2': ((-95, -42, 364), (10, 0, 352), 30, (-80, -38, 363), (25, 0, 352), 30),
-    'N1': ((0, -600, 300), (0, 0, 280), 24, (0, -740, 315), (0, 0, 282), 24),
+    'N1': ((-430, -560, 540), (0, 0, 290), 22, (-390, -600, 520), (20, 0, 285), 22),
+    'N1b': ((0, -600, 300), (0, 0, 280), 24, (0, -740, 315), (0, 0, 282), 24),
     'N2': ((-150, -170, 262), (0, 0, 348), 22, (-110, -195, 290), (10, 0, 352), 22),
     'P1': ((0, -900, 430), (0, 0, 200), 24, (0, -620, 170), (0, 0, 80), 24),
     'P2': ((-30, -540, 120), (0, 0, 150), 22, (-30, -470, 115), (0, 0, 150), 22),
     'P3': ((0, -560, 290), (0, 0, 275), 24, (0, -720, 310), (0, 0, 278), 24),
     'A1': ((0, -250, 352), (0, 0, 345), 28, (0, -225, 352), (0, 0, 345), 28),
     'A2': ((0, -660, 290), (0, 0, 285), 24, (0, -630, 290), (0, 0, 285), 24),
+    'A2b': ((-70, -430, 125), (0, 0, 240), 18, (-40, -410, 135), (0, 0, 245), 18),
     'A3': ((165, -270, 280), (245, 0, 205), 26, (180, -240, 270), (245, 0, 203), 26),
     'W1': ((-150, -265, 255), (0, 0, 300), 22, (-130, -255, 262), (20, 0, 305), 22),
     'W2': ((105, -80, 318), (55, 0, 312), 24, (80, -82, 322), (45, 0, 314), 24),
+    'W2b': ((160, -390, 230), (0, 0, 300), 20, (140, -370, 236), (-10, 0, 302), 20),
     'W3': ((80, -82, 322), (45, 0, 314), 24, (72, -82, 323), (42, 0, 314), 24),
     'T1': ((0, -700, 300), (0, 0, 280), 24, (0, -700, 300), (0, 0, 280), 24),
     'T2': ((396, -140, 300), (350, 0, 262), 22, (388, -128, 300), (350, 0, 264), 22),
@@ -573,8 +571,8 @@ def frame_handler(scene, depsgraph=None):
     update(t, sh)
     bpy.context.view_layer.update()
     loc, tgt, lens = camera_for(sh['name'], (t - sh['t0']) / max(1e-6, sh['t1'] - sh['t0']), t)
-    if sh['name'] == 'T1':                                  # one decaying jolt on "bhookamp" (never noise shake)
-        dt = t - EV['BHOOKAMP']
+    if sh['name'] == 'T1':                                  # one decaying jolt on "earthquake" (never noise shake)
+        dt = t - EV['QUAKE']
         if 0 <= dt < 1.2:
             j = 2.2 * math.exp(-dt * 4.0) * math.sin(dt * 2 * math.pi * 3.0)
             loc = loc + Vector((0, 0, j)); tgt = tgt + Vector((0, 0, j))
