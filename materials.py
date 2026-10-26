@@ -217,3 +217,118 @@ def water_flow(name='WaterFlow'):
     nt.links.new(tc.outputs['Object'], mp.inputs['Vector']); nt.links.new(mp.outputs['Vector'], wv.inputs['Vector'])
     nt.links.new(wv.outputs['Fac'], mr.inputs['Value']); nt.links.new(mr.outputs['Result'], bsdf.inputs['Emission Strength'])
     return m
+
+
+# ---------------------------------------------------------------- Chenab set
+def _value(nt, name, v=0.0):
+    n = nt.nodes.new('ShaderNodeValue'); n.name = name; n.outputs[0].default_value = v
+    return n
+
+
+def rock(name='Rock'):
+    """Gorge rock: two-tone noise + bump; orange 'carrying' glow masked to the two abutment zones.
+    Node 'Glow' (value 0..1) is set per frame by scene.py."""
+    m = _principled(name, '#8F7E68', rough=0.85)
+    _noise_mix(m, '#7A6A57', '#A3927A', scale=0.02, detail=6.0, bump=0.25)
+    nt = m.node_tree; bsdf = nt.nodes.get('Principled BSDF')
+    tc = nt.nodes.new('ShaderNodeTexCoord'); sep = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(tc.outputs['Object'], sep.inputs[0])
+    ax = nt.nodes.new('ShaderNodeMath'); ax.operation = 'ABSOLUTE'; nt.links.new(sep.outputs['X'], ax.inputs[0])
+    dx = nt.nodes.new('ShaderNodeMath'); dx.operation = 'SUBTRACT'; dx.inputs[1].default_value = 275.0
+    nt.links.new(ax.outputs[0], dx.inputs[0])
+    dz = nt.nodes.new('ShaderNodeMath'); dz.operation = 'SUBTRACT'; dz.inputs[1].default_value = 225.0
+    nt.links.new(sep.outputs['Z'], dz.inputs[0])
+    cb = nt.nodes.new('ShaderNodeCombineXYZ')
+    nt.links.new(dx.outputs[0], cb.inputs[0]); nt.links.new(sep.outputs['Y'], cb.inputs[1]); nt.links.new(dz.outputs[0], cb.inputs[2])
+    ln = nt.nodes.new('ShaderNodeVectorMath'); ln.operation = 'LENGTH'; nt.links.new(cb.outputs[0], ln.inputs[0])
+    mr = nt.nodes.new('ShaderNodeMapRange'); mr.inputs['From Min'].default_value = 40.0; mr.inputs['From Max'].default_value = 190.0
+    mr.inputs['To Min'].default_value = 1.0; mr.inputs['To Max'].default_value = 0.0
+    nt.links.new(ln.outputs['Value'], mr.inputs['Value'])
+    g = _value(nt, 'Glow', 0.0)
+    mul = nt.nodes.new('ShaderNodeMath'); mul.operation = 'MULTIPLY'
+    nt.links.new(mr.outputs['Result'], mul.inputs[0]); nt.links.new(g.outputs[0], mul.inputs[1])
+    mul2 = nt.nodes.new('ShaderNodeMath'); mul2.operation = 'MULTIPLY'; mul2.inputs[1].default_value = 2.2
+    nt.links.new(mul.outputs[0], mul2.inputs[0])
+    bsdf.inputs['Emission Color'].default_value = _srgb('#E2673A')
+    nt.links.new(mul2.outputs[0], bsdf.inputs['Emission Strength'])
+    return m
+
+
+def river(name='River'):
+    """River: blue with flow stripes along Y; mapping node 'FlowMap' location.y is scrolled per frame."""
+    m = _principled(name, '#3E8FC2', rough=0.12, **{'Coat Weight': 0.4})
+    nt = m.node_tree; bsdf = nt.nodes.get('Principled BSDF')
+    tc = nt.nodes.new('ShaderNodeTexCoord'); mp = nt.nodes.new('ShaderNodeMapping'); mp.name = 'FlowMap'
+    mp.inputs['Scale'].default_value = (0.08, 0.02, 0.08)
+    nz = nt.nodes.new('ShaderNodeTexNoise'); nz.inputs['Scale'].default_value = 3.0; nz.inputs['Detail'].default_value = 3.0
+    ramp = nt.nodes.new('ShaderNodeValToRGB')
+    ramp.color_ramp.elements[0].position = 0.45; ramp.color_ramp.elements[0].color = _srgb('#2F7CB0')
+    ramp.color_ramp.elements[1].position = 0.62; ramp.color_ramp.elements[1].color = _srgb('#9CCDEB')
+    nt.links.new(tc.outputs['Object'], mp.inputs['Vector']); nt.links.new(mp.outputs['Vector'], nz.inputs['Vector'])
+    nt.links.new(nz.outputs['Fac'], ramp.inputs['Fac']); nt.links.new(ramp.outputs['Color'], bsdf.inputs['Base Color'])
+    return m
+
+
+def fade_mix(m, name='Fade'):
+    """Wrap a material's surface in Mix(transparent, surface) with node value `name` (1 = fully shown)."""
+    nt = m.node_tree; out = nt.nodes.get('Material Output')
+    src = out.inputs['Surface'].links[0].from_socket
+    tr = nt.nodes.new('ShaderNodeBsdfTransparent'); mix = nt.nodes.new('ShaderNodeMixShader')
+    v = _value(nt, name, 1.0)
+    nt.links.new(v.outputs[0], mix.inputs['Fac']); nt.links.new(tr.outputs['BSDF'], mix.inputs[1])
+    nt.links.new(src, mix.inputs[2]); nt.links.new(mix.outputs['Shader'], out.inputs['Surface'])
+    return m
+
+
+def flat(name, color, strength=1.0):
+    """Flat unlit colour (silhouettes): pure emission, so lighting never models the shape."""
+    m = bpy.data.materials.new(name); m.use_nodes = True; nt = m.node_tree
+    out = nt.nodes.get('Material Output'); nt.nodes.remove(nt.nodes.get('Principled BSDF'))
+    em = nt.nodes.new('ShaderNodeEmission'); em.inputs['Color'].default_value = _srgb(color); em.inputs['Strength'].default_value = strength
+    nt.links.new(em.outputs['Emission'], out.inputs['Surface'])
+    m.diffuse_color = _srgb(color)
+    return fade_mix(m)
+
+
+def streak(name='WindStreak', color='#9CD3F2', axis='Y', period=0.025):
+    """Moving wind streaks: emission bands along `axis` (object space), gaps transparent.
+    Mapping node 'FlowMap' location is scrolled per frame; node 'Fade' scales opacity."""
+    m = bpy.data.materials.new(name); m.use_nodes = True; nt = m.node_tree
+    out = nt.nodes.get('Material Output'); nt.nodes.remove(nt.nodes.get('Principled BSDF'))
+    tc = nt.nodes.new('ShaderNodeTexCoord'); mp = nt.nodes.new('ShaderNodeMapping'); mp.name = 'FlowMap'
+    sc = [1.0, 1.0, 1.0]; sc['XYZ'.index(axis)] = period; mp.inputs['Scale'].default_value = sc
+    wv = nt.nodes.new('ShaderNodeTexWave'); wv.wave_type = 'BANDS'; wv.bands_direction = axis; wv.wave_profile = 'SAW'
+    wv.inputs['Scale'].default_value = 1.0; wv.inputs['Distortion'].default_value = 0.0
+    ramp = nt.nodes.new('ShaderNodeValToRGB'); ramp.color_ramp.elements[0].position = 0.55; ramp.color_ramp.elements[1].position = 0.95
+    em = nt.nodes.new('ShaderNodeEmission'); em.inputs['Color'].default_value = _srgb(color); em.inputs['Strength'].default_value = 5.0
+    tr = nt.nodes.new('ShaderNodeBsdfTransparent'); mix = nt.nodes.new('ShaderNodeMixShader')
+    fade = _value(nt, 'Fade', 1.0)
+    mul = nt.nodes.new('ShaderNodeMath'); mul.operation = 'MULTIPLY'
+    nt.links.new(tc.outputs['Object'], mp.inputs['Vector']); nt.links.new(mp.outputs['Vector'], wv.inputs['Vector'])
+    nt.links.new(wv.outputs['Fac'], ramp.inputs['Fac']); nt.links.new(ramp.outputs['Color'], mul.inputs[0])
+    nt.links.new(fade.outputs[0], mul.inputs[1]); nt.links.new(mul.outputs[0], mix.inputs['Fac'])
+    nt.links.new(tr.outputs['BSDF'], mix.inputs[1]); nt.links.new(em.outputs['Emission'], mix.inputs[2])
+    nt.links.new(mix.outputs['Shader'], out.inputs['Surface'])
+    m.diffuse_color = (*_srgb(color)[:3], 0.6)
+    return m
+
+
+def chenab_library(L):
+    L['rock'] = rock()
+    L['hatchRock'] = hatch('CutHatchRock', scale=0.045)
+    L['river'] = river()
+    L['archSteel'] = _principled('ArchSteel', '#C9CFD5', rough=0.4, metal=0.35)
+    L['pierSteel'] = _principled('PierSteel', '#AEB6BE', rough=0.45, metal=0.35)
+    L['deck'] = _principled('DeckGirder', '#8C96A1', rough=0.5, metal=0.25)
+    L['deckTop'] = _principled('DeckTop', '#BDB6AC', rough=0.75)
+    L['concrete'] = _principled('PierConcrete', '#D4CCC0', rough=0.7)
+    _noise_mix(L['concrete'], '#C9C0B3', '#DDD6CB', scale=0.4, bump=0.05)
+    L['eiffel'] = flat('EiffelFlat', '#1D3344', 1.0)
+    L['ghost'] = fade_mix(xray('GhostPillar', '#E9F4FB'))
+    L['arrow'] = emissive('ArrowOrange', '#E2673A', 5.0)
+    L['arrowDash'] = streak('ArrowDash', '#E2673A', axis='Z', period=0.09)
+    L['wind'] = streak('WindStreak', '#BFE4F7', axis='Y', period=0.02)
+    L['shock'] = fade_mix(xray('Shockwave', '#DDF1FB'))
+    L['cloud'] = _principled('Cloud', '#F7F3EC', rough=0.9, **{'Subsurface Weight': 0.15})
+    L['sunDisc'] = emissive('SunDisc', '#FFE2A8', 25.0)
+    return L
