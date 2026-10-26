@@ -361,11 +361,11 @@ def build_fx(L):
     bm = bmesh.new(); bm_box(bm, (-14, -14, 0), (14, 14, GB)); OBJ['ghost'] = mesh_obj('GhostPillar', bm, L['ghost'])
     # weight arrow under the train + dashed version
     OBJ['wArrow'] = []
-    for name, mat in (('WArrow', L['arrow']), ('WArrowDash', L['arrowDash'])):
-        root = empty(name)
-        sh = cyl(name + 'Shaft', (0, 0, -20), 2.6, 40, mat); sh.parent = root
-        hd = cone(name + 'Head', (0, 0, -46), 7.0, 12, mat); hd.rotation_euler = (math.pi, 0, 0); hd.parent = root
-        OBJ['wArrow'].append(root)
+    for side in (-1, 1):                                  # load leaves the train diagonally, toward each foundation
+        root = empty(f'WArrow{side:+d}')
+        sh = cyl(f'WArrow{side:+d}Shaft', (0, 0, 24), 2.8, 48, L['arrow']); sh.parent = root
+        hd = cone(f'WArrow{side:+d}Head', (0, 0, 54), 7.5, 12, L['arrow']); hd.parent = root
+        root['side'] = side; OBJ['wArrow'].append(root)
     # chevrons flowing along the near and far ribs, crown → springing, both halves
     OBJ['chev'] = []
     for side in (-1, 1):
@@ -376,7 +376,8 @@ def build_fx(L):
     OBJ['thrust'] = []
     for side in (-1, 1):                                    # thrust into the rock along the arch tangent
         root = empty(f'Thrust{side:+d}'); d = Vector((side, 0, -2 * (CROWN_B - Z_SPRING) / A)).normalized()
-        p0 = Vector((side * (A - 30), 0, zb(A - 30) + RIB_D / 2))
+        tip = Vector((side * (A - 4), -(yr(A) + 6), Z_SPRING + RIB_D / 2))   # head ends at the foundation, in front of the near rib
+        p0 = tip - d * 72
         sh = cyl(f'Thrust{side:+d}Shaft', (0, 0, 22), 4.5, 44, L['arrow']); sh.parent = root
         hd = cone(f'Thrust{side:+d}Head', (0, 0, 52), 11.0, 18, L['arrow']); hd.parent = root
         root.location = p0; point_along(root, d); OBJ['thrust'].append(root)
@@ -469,14 +470,12 @@ def update(t, sh):
     if n == 'P2':
         OBJ['ghost'].scale = (1, 1, eo(u / 0.45)); set_value(L['ghost'], 'Fade', 1.0 - eio((u - 0.75) / 0.25) * 0.85)
     # weight arrow + chevrons + thrust + glow
-    solid, dash = OBJ['wArrow']
-    show(solid, n == 'A1'); show(dash, n == 'A2' and u < 0.6)
-    for a_ in (solid, dash):
-        a_.location = (ANIM['train_c'], 0, GB - 1)
-    if n == 'A1':
-        solid.scale = (1, 1, eo(u / 0.35))
-    set_value(L['arrowDash'], 'Fade', 1.0 - eio(u / 0.6))
-    L['arrowDash'].node_tree.nodes['FlowMap'].inputs['Location'].default_value[2] = t * 2.0
+    for a_ in OBJ['wArrow']:
+        show(a_, n == 'A1')
+        if n == 'A1':
+            sd = a_['side']; p0 = Vector((ANIM['train_c'] + sd * 4, 0, GB - 2))
+            a_.location = p0; point_along(a_, Vector((sd * A, 0, Z_SPRING)) - Vector((0, 0, GB)))   # crown → foundation
+            k = eo(u / 0.35); a_.scale = (1, 1, k)
     flow = n in ('A2', 'A3')
     for c in OBJ['chev']:
         show(c, flow)
@@ -487,9 +486,9 @@ def update(t, sh):
             c.location = (x, c['rib'] * (yr(x) + 3.0), zc); point_along(c, Vector((c['side'], 0, dzdx * c['side'])))
             sc_ = min(1.0, 4 * q, 4 * (1 - q)) * (eo(u / 0.3) if n == 'A2' else 1.0); c.scale = (sc_, sc_, sc_)
     for th in OBJ['thrust']:
-        show(th, n == 'A3')
-        if n == 'A3':
-            k = eo(u / 0.4); th.scale = (k, k, k)
+        show(th, n in ('A2', 'A3'))                         # into the rock at BOTH foundations
+        if n in ('A2', 'A3'):
+            k = eo(u / 0.4) if n == 'A2' else 1.0; th.scale = (k, k, k)
     set_value(L['rock'], 'Glow', eio((u - 0.15) / 0.5) if n == 'A3' else 0.0)
     # wind
     wind = n in ('W1', 'W2', 'W3')

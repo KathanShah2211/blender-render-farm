@@ -317,8 +317,8 @@ def chenab_library(L, glow=(275.0, 225.0)):
     L['rock'] = rock(gx=glow[0], gz=glow[1])
     L['hatchRock'] = hatch('CutHatchRock', scale=0.045)
     L['river'] = river()
-    L['archSteel'] = _principled('ArchSteel', '#C9CFD5', rough=0.4, metal=0.35)
-    L['pierSteel'] = _principled('PierSteel', '#AEB6BE', rough=0.45, metal=0.35)
+    L['archSteel'] = _principled('ArchSteel', '#56665C', rough=0.45, metal=0.3)     # dark grey-green like the real ribs, lifted off black
+    L['pierSteel'] = _principled('PierSteel', '#5C6B62', rough=0.45, metal=0.3)
     L['deck'] = _principled('DeckGirder', '#8C96A1', rough=0.5, metal=0.25)
     L['deckTop'] = _principled('DeckTop', '#BDB6AC', rough=0.75)
     L['concrete'] = _principled('PierConcrete', '#D4CCC0', rough=0.7)
