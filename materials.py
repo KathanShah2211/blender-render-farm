@@ -247,7 +247,7 @@ def rock(name='Rock'):
     g = _value(nt, 'Glow', 0.0)
     mul = nt.nodes.new('ShaderNodeMath'); mul.operation = 'MULTIPLY'
     nt.links.new(mr.outputs['Result'], mul.inputs[0]); nt.links.new(g.outputs[0], mul.inputs[1])
-    mul2 = nt.nodes.new('ShaderNodeMath'); mul2.operation = 'MULTIPLY'; mul2.inputs[1].default_value = 2.2
+    mul2 = nt.nodes.new('ShaderNodeMath'); mul2.operation = 'MULTIPLY'; mul2.inputs[1].default_value = 0.55
     nt.links.new(mul.outputs[0], mul2.inputs[0])
     bsdf.inputs['Emission Color'].default_value = _srgb('#E2673A')
     nt.links.new(mul2.outputs[0], bsdf.inputs['Emission Strength'])
@@ -300,7 +300,7 @@ def streak(name='WindStreak', color='#9CD3F2', axis='Y', period=0.025):
     wv = nt.nodes.new('ShaderNodeTexWave'); wv.wave_type = 'BANDS'; wv.bands_direction = axis; wv.wave_profile = 'SAW'
     wv.inputs['Scale'].default_value = 1.0; wv.inputs['Distortion'].default_value = 0.0
     ramp = nt.nodes.new('ShaderNodeValToRGB'); ramp.color_ramp.elements[0].position = 0.55; ramp.color_ramp.elements[1].position = 0.95
-    em = nt.nodes.new('ShaderNodeEmission'); em.inputs['Color'].default_value = _srgb(color); em.inputs['Strength'].default_value = 5.0
+    em = nt.nodes.new('ShaderNodeEmission'); em.inputs['Color'].default_value = _srgb(color); em.inputs['Strength'].default_value = 1.8
     tr = nt.nodes.new('ShaderNodeBsdfTransparent'); mix = nt.nodes.new('ShaderNodeMixShader')
     fade = _value(nt, 'Fade', 1.0)
     mul = nt.nodes.new('ShaderNodeMath'); mul.operation = 'MULTIPLY'
@@ -325,7 +325,7 @@ def chenab_library(L):
     _noise_mix(L['concrete'], '#C9C0B3', '#DDD6CB', scale=0.4, bump=0.05)
     L['eiffel'] = flat('EiffelFlat', '#1D3344', 1.0)
     L['ghost'] = fade_mix(xray('GhostPillar', '#E9F4FB'))
-    L['arrow'] = emissive('ArrowOrange', '#E2673A', 5.0)
+    L['arrow'] = emissive('ArrowOrange', '#E2673A', 1.4)
     L['arrowDash'] = streak('ArrowDash', '#E2673A', axis='Z', period=0.09)
     L['wind'] = streak('WindStreak', '#BFE4F7', axis='Y', period=0.02)
     L['shock'] = fade_mix(xray('Shockwave', '#DDF1FB'))

@@ -169,10 +169,10 @@ def build_world(L):
     mr.inputs['From Min'].default_value = -0.02; mr.inputs['From Max'].default_value = 0.42
     nt.links.new(tcw.outputs['Generated'], sep.inputs[0]); nt.links.new(sep.outputs['Z'], mr.inputs['Value'])
     nt.links.new(mr.outputs['Result'], ramp.inputs['Fac'])
-    ramp.color_ramp.elements[0].color = (0.86, 0.80, 0.70, 1); ramp.color_ramp.elements[1].color = (0.30, 0.54, 0.82, 1)
+    ramp.color_ramp.elements[0].color = (0.86, 0.80, 0.70, 1); ramp.color_ramp.elements[1].color = (0.13, 0.36, 0.78, 1)
     nt.links.new(ramp.outputs['Color'], bg.inputs['Color'])
     bpy.ops.object.light_add(type='SUN', location=(0, 0, 900)); sun = bpy.context.object; sun.name = 'Sun'
-    sun.data.energy = 4.5; sun.data.color = (1.0, 0.86, 0.68); sun.data.angle = math.radians(2)
+    sun.data.energy = 5.5; sun.data.color = (1.0, 0.86, 0.68); sun.data.angle = math.radians(2)
     OBJ['sun'] = sun; set_sun(Vector((0.45, 0.75, -0.62)))
     bpy.ops.mesh.primitive_plane_add(size=30000, location=(0, 0, -150)); g = bpy.context.object; g.name = 'Ground'
     g.data.materials.append(L['sand'])
@@ -317,7 +317,7 @@ def build_train(L):
     ANIM['train_len'] = y
     root.location = (0, 0, DECK)
     OBJ['train'] = root
-    anchor('train', (-y / 2, 0, DECK + 6), root)
+    anchor('train', (-y / 2, 0, 6.0), root)            # local to the train root
     return root
 
 
@@ -359,7 +359,7 @@ def build_fx(L):
     for side in (-1, 1):
         for rib in (-1, 1):
             for k in range(9):
-                c = cone(f'Chev{side:+d}{rib:+d}{k}', (0, 0, 0), 4.2, 9.0, L['arrow'], verts=16)
+                c = cone(f'Chev{side:+d}{rib:+d}{k}', (0, 0, 0), 6.0, 12.0, L['arrow'], verts=16)
                 c['side'] = side; c['rib'] = rib; c['k'] = k; OBJ['chev'].append(c)
     OBJ['thrust'] = []
     for side in (-1, 1):                                    # thrust into the rock along the arch tangent
@@ -370,10 +370,10 @@ def build_fx(L):
         root.location = p0; point_along(root, d); OBJ['thrust'].append(root)
     # wind streaks across the arch (blowing up the gorge, along +y)
     OBJ['wind'] = []
-    for k in range(34):
+    for k in range(22):
         x = -210 + (k * 53.3) % 420; z = 245 + (k * 37.1) % 130
         pts = [(x + 6 * math.sin(yy / 90 + k), yy, z + 5 * math.sin(yy / 70 + k * 0.7)) for yy in range(-320, 330, 25)]
-        OBJ['wind'].append(tube_curve(f'Wind{k}', pts, 0.9, L['wind']))
+        OBJ['wind'].append(tube_curve(f'Wind{k}', pts, 0.4, L['wind']))
     # shockwave (stylised: an expanding bright shell, no fire, no debris)
     OBJ['shock'] = sphere('Shock', (0, 0, 0), 1.0, L['shock'], seg=48)
     # clouds: stylised puffs below the deck
@@ -496,7 +496,7 @@ def update(t, sh):
         show(OBJ['sunDisc'], el > 0.02); OBJ['sunDisc'].location = tuple(pos)
         bpy.context.scene.world.node_tree.nodes['Background'].inputs['Strength'].default_value = 0.25 + 0.45 * el
     else:
-        set_sun(Vector((0.45, 0.75, -0.62))); OBJ['sun'].data.energy = 4.5; show(OBJ['sunDisc'], False)
+        set_sun(Vector((0.45, 0.75, -0.62))); OBJ['sun'].data.energy = 5.5; show(OBJ['sunDisc'], False)
         bpy.context.scene.world.node_tree.nodes['Background'].inputs['Strength'].default_value = 0.7
     L['river'].node_tree.nodes['FlowMap'].inputs['Location'].default_value[1] = -t * 0.35
 
