@@ -24,10 +24,10 @@ SPAN = 467.0; A = SPAN / 2
 DECK = 359.0                  # rail top above the river bed
 GIRDER = 7.0                  # rail top → girder bottom
 GB = DECK - GIRDER            # girder bottom
-Z_SPRING = 222.0              # arch springing (bottom chord) on the abutments
+Z_SPRING = 198.0              # arch springing (bottom chord): low on the gorge walls (rise ≈ 0.30 × span, checked vs side photo)
 RIB_D = 11.0                  # rib depth (chord to chord)
 CROWN_B = GB - 1.5 - RIB_D    # bottom chord at the crown
-BED = 62.0                    # half-width of the flat river bed at the bridge
+BED = 75.0                    # half-width of the flat river bed at the bridge
 Y_CUT = -320.0                # the gorge is cut open here (hatched face)
 EIFFEL = 330.0
 V_TRAIN = 18.0                # m/s (~65 km/h)
@@ -201,7 +201,7 @@ def build_terrain(L):
     # river: a strip that follows the meander, flow scrolled along Y
     bm = bmesh.new(); prev = None
     for y in [Y_CUT + 0.5] + ys[1:]:
-        m = meander(y); row = [bm.verts.new((m + dx, y, 1.2)) for dx in (-52.0, 52.0)]
+        m = meander(y); row = [bm.verts.new((m + dx, y, 1.2)) for dx in (-64.0, 64.0)]
         if prev:
             bm.faces.new((prev[0], prev[1], row[1], row[0]))
         prev = row
@@ -259,8 +259,8 @@ def build_deck(L):
         OBJ['deck'][k] = o
     # slope piers (concrete, hollow-looking slabs) — on both abutments and along the slopes
     OBJ['slopePiers'] = []
-    for x in (-(A + 20), -300.0, -340.0, A + 20, 300.0, 350.0, 400.0, 450.0, 500.0, 550.0, 600.0):
-        base = (Z_SPRING + 22) if abs(abs(x) - (A + 20)) < 1 else ground(x, 0) - 6
+    for x in (-340.0, 350.0, 400.0, 450.0, 500.0, 550.0, 600.0):
+        base = ground(x, 0) - 6
         if GB - base < 4:
             continue
         bm = bmesh.new(); h = GB - base; wb_, wt_ = 4.2 + h * 0.012, 3.4
@@ -272,23 +272,35 @@ def build_deck(L):
     # steel lattice piers standing on the arch (~48 m apart) + bearings at the crown
     OBJ['archPiers'] = []
     for x in (-192.0, -144.0, -96.0, -48.0, 48.0, 96.0, 144.0, 192.0):
-        bm = bmesh.new(); z0, z1 = zt(x) + 1.8, GB; y0 = yr(x)
-        legs = [((x + dx, s * y0, z0), (x + dx, s * 5.0, z1)) for dx in (-3.0, 3.0) for s in (-1, 1)]
-        for a_, b_ in legs:
-            bm_beam(bm, a_, b_, 1.6, 1.6)
-        n = max(1, int((z1 - z0) / 12))
-        lerp3 = lambda p, q, u: tuple(pi + (qi - pi) * u for pi, qi in zip(p, q))
-        for k in range(n):
-            u0, u1 = k / n, (k + 1) / n
-            for (p, q), (r, s_) in ((legs[0], legs[2]), (legs[1], legs[3]), (legs[0], legs[1]), (legs[2], legs[3])):
-                bm_beam(bm, lerp3(p, q, u0), lerp3(r, s_, u1), 0.7, 0.7)
-                bm_beam(bm, lerp3(r, s_, u0), lerp3(p, q, u1), 0.7, 0.7)
-        o = mesh_obj(f'ArchPier{x:+.0f}', bm, L['pierSteel']); OBJ['archPiers'].append(o)
+        OBJ['archPiers'].append(lattice_pier(f'ArchPier{x:+.0f}', x, zt(x) + 1.8, yr(x), 3.0, L))
+    for s in (-1, 1):                                     # tall lattice towers on the arch foundations (photos #1, #2)
+        x = s * (A + 20)
+        OBJ['footPiers'] = OBJ.get('footPiers', []) + [lattice_pier(f'FootPier{s:+d}', x, Z_SPRING + 22, 9.0, 4.0, L)]
+        x2 = s * 300.0                                    # first approach pier: also a steel lattice tower (photo #1)
+        OBJ['footPiers'].append(lattice_pier(f'SlopeTower{s:+d}', x2, ground(x2, 0) - 4, 7.0, 3.5, L))
     bm = bmesh.new()
     for x in (-24.0, 0.0, 24.0):
         for s in (-1, 1):
             bm_box(bm, (x - 2, s * yr(x) - 1.5, zt(x) + 1.8), (x + 2, s * yr(x) + 1.5, GB))
     OBJ['archPiers'].append(mesh_obj('CrownBearings', bm, L['pierSteel']))
+
+
+def lattice_pier(name, x, z0, yb, hx, L):
+    """Four-legged steel lattice column from z0 to the girder: legs splay from ±yb at the foot to ±5 at the top,
+    X-bracing on all four faces every ~12 m."""
+    bm = bmesh.new(); z1 = GB
+    legs = [((x + dx, s * yb, z0), (x + dx * 0.8, s * 5.0, z1)) for dx in (-hx, hx) for s in (-1, 1)]
+    for a_, b_ in legs:
+        bm_beam(bm, a_, b_, 1.8, 1.8)
+    n = max(1, int((z1 - z0) / 12))
+    lerp3 = lambda p, q, u: tuple(pi + (qi - pi) * u for pi, qi in zip(p, q))
+    for k in range(n):
+        u0, u1 = k / n, (k + 1) / n
+        for (p, q), (r, s_) in ((legs[0], legs[2]), (legs[1], legs[3]), (legs[0], legs[1]), (legs[2], legs[3])):
+            bm_beam(bm, lerp3(p, q, u0), lerp3(r, s_, u1), 0.7, 0.7)
+            bm_beam(bm, lerp3(r, s_, u0), lerp3(p, q, u1), 0.7, 0.7)
+            bm_beam(bm, lerp3(p, q, u1), lerp3(r, s_, u1), 0.8, 0.8)
+    return mesh_obj(name, bm, L['pierSteel'])
 
 
 COACH_W, COACH_L, LOCO_L = 3.24, 23.54, 20.4
@@ -363,7 +375,7 @@ def build_fx(L):
                 c['side'] = side; c['rib'] = rib; c['k'] = k; OBJ['chev'].append(c)
     OBJ['thrust'] = []
     for side in (-1, 1):                                    # thrust into the rock along the arch tangent
-        root = empty(f'Thrust{side:+d}'); d = Vector((side, 0, -1.006)).normalized()
+        root = empty(f'Thrust{side:+d}'); d = Vector((side, 0, -2 * (CROWN_B - Z_SPRING) / A)).normalized()
         p0 = Vector((side * (A - 30), 0, zb(A - 30) + RIB_D / 2))
         sh = cyl(f'Thrust{side:+d}Shaft', (0, 0, 22), 4.5, 44, L['arrow']); sh.parent = root
         hd = cone(f'Thrust{side:+d}Head', (0, 0, 52), 11.0, 18, L['arrow']); hd.parent = root
@@ -375,7 +387,13 @@ def build_fx(L):
         pts = [(x + 6 * math.sin(yy / 90 + k), yy, z + 5 * math.sin(yy / 70 + k * 0.7)) for yy in range(-320, 330, 25)]
         OBJ['wind'].append(tube_curve(f'Wind{k}', pts, 0.4, L['wind']))
     # shockwave (stylised: an expanding bright shell, no fire, no debris)
-    OBJ['shock'] = sphere('Shock', (0, 0, 0), 1.0, L['shock'], seg=48)
+    bpy.ops.mesh.primitive_torus_add(major_radius=1.0, minor_radius=0.022, major_segments=128, minor_segments=12)
+    OBJ['ring'] = bpy.context.object; OBJ['ring'].name = 'ShockRing'; OBJ['ring'].data.materials.append(L['shockRing'])
+    bpy.ops.mesh.primitive_torus_add(major_radius=1.0, minor_radius=0.13, major_segments=96, minor_segments=16)
+    OBJ['dust'] = bpy.context.object; OBJ['dust'].name = 'DustRing'; OBJ['dust'].data.materials.append(L['dust'])
+    for o in (OBJ['ring'], OBJ['dust']):
+        for p_ in o.data.polygons:
+            p_.use_smooth = True
     # clouds: stylised puffs below the deck
     OBJ['clouds'] = []
     for k, (x, y, z, r) in enumerate(((-150, -90, 300, 22), (-60, 140, 292, 26), (40, -150, 310, 20), (120, 80, 296, 24),
@@ -391,7 +409,7 @@ def build_all(L):
     build_terrain(L); build_arch(L); build_deck(L); build_train(L); build_eiffel(L); build_fx(L)
     for name, p in (('bed', (0, 0, 0)), ('deck', (0, 0, DECK)), ('crown', (0, 0, zt(0))), ('eiffelTip', (0, 0, EIFFEL)),
                     ('springL', (-A, 0, Z_SPRING)), ('springR', (A, 0, Z_SPRING)), ('ghost', (0, 0, 175)),
-                    ('abutR', (A + 20, 0, Z_SPRING)), ('truss', (60, -yr(60), zt(60) + 4)), ('pier', (300, -6, 300)),
+                    ('abutR', (A + 20, 0, Z_SPRING)), ('truss', (60, -yr(60), zt(60) + 4)), ('pier', (350, -6, 305)),
                     ('archMid', (0, 0, 300))):
         anchor(name, p)
 
@@ -480,11 +498,15 @@ def update(t, sh):
     L['wind'].node_tree.nodes['FlowMap'].inputs['Location'].default_value[1] = -t * 2.2
     set_value(L['wind'], 'Fade', eio(u / 0.3) if n == 'W1' else 1.0)
     # shockwave on the north slope pier at x = 300
-    sk = OBJ['shock']; show(sk, n in ('T2', 'T3'))
-    if n in ('T2', 'T3'):
-        r = lerp(4, 44, eo(u)) if n == 'T2' else lerp(44, 90, eo(u))
-        sk.location = (318, -40, 276); sk.scale = (r, r, r * 0.8)
-        set_value(L['shock'], 'Fade', 1.0 if n == 'T2' else 1.0 - eio(u / 0.6))
+    on = n in ('T2', 'T3'); show(OBJ['ring'], on); show(OBJ['dust'], on)
+    if on:                                                 # source on the slope in front of the pier base; rings lie on the slope
+        c = Vector((350, -34, ground(350, -34) + 2.5)); tilt = -math.atan(0.33)
+        r = lerp(3, 52, eo(u)) if n == 'T2' else lerp(52, 95, eo(u))
+        rd = lerp(2, 34, eo(u)) if n == 'T2' else lerp(34, 42, eo(u))
+        for o, rr, sz in ((OBJ['ring'], r, 1.0), (OBJ['dust'], rd, 0.45)):
+            o.location = c; o.rotation_euler = (0, tilt, 0); o.scale = (rr, rr, rr * sz)
+        set_value(L['shockRing'], 'Fade', 1.0 if n == 'T2' else 1.0 - eio(u / 0.7))
+        set_value(L['dust'], 'Fade', 0.75 * (eio(u / 0.25) if n == 'T2' else 1.0 - eio(u / 0.5)))
     # clouds, sun
     for c in OBJ['clouds']:
         show(c, n in ('N2', 'Z1'))
@@ -519,13 +541,13 @@ CAMS = {   # name: (loc0, tgt0, lens0, loc1, tgt1, lens1)
     'P3': ((0, -560, 290), (0, 0, 275), 24, (0, -720, 310), (0, 0, 278), 24),
     'A1': ((0, -250, 352), (0, 0, 345), 28, (0, -225, 352), (0, 0, 345), 28),
     'A2': ((0, -660, 290), (0, 0, 285), 24, (0, -630, 290), (0, 0, 285), 24),
-    'A3': ((170, -270, 300), (245, 0, 228), 26, (185, -240, 290), (245, 0, 226), 26),
+    'A3': ((165, -270, 280), (245, 0, 205), 26, (180, -240, 270), (245, 0, 203), 26),
     'W1': ((-150, -265, 255), (0, 0, 300), 22, (-130, -255, 262), (20, 0, 305), 22),
     'W2': ((105, -80, 318), (55, 0, 312), 24, (80, -82, 322), (45, 0, 314), 24),
     'W3': ((80, -82, 322), (45, 0, 314), 24, (72, -82, 323), (42, 0, 314), 24),
     'T1': ((0, -700, 300), (0, 0, 280), 24, (0, -700, 300), (0, 0, 280), 24),
-    'T2': ((340, -125, 300), (300, 0, 292), 24, (332, -112, 300), (300, 0, 294), 24),
-    'T3': ((332, -112, 300), (300, 0, 294), 24, (328, -106, 301), (300, 0, 295), 24),
+    'T2': ((396, -140, 300), (350, 0, 262), 22, (388, -128, 300), (350, 0, 264), 22),
+    'T3': ((388, -128, 300), (350, 0, 264), 22, (384, -122, 301), (350, 0, 265), 22),
     'Y1': ((0, -700, 300), (0, 0, 310), 24, (0, -660, 300), (0, 0, 310), 24),
     'Z1': ((-10, -170, 300), (0, 120, 345), 20, (-5, 30, 302), (0, 220, 345), 20),
 }
@@ -617,6 +639,7 @@ def parse_args():
     p.add_argument('--no-blur', action='store_true')
     p.add_argument('--before', action='store_true')        # unused here; accepted for the farm workflow
     p.add_argument('--anchors', default=None)
+    p.add_argument('--refcam', action='store_true')   # side view for checking the silhouette against reference photos
     a = p.parse_args(argv)
     a.w, a.h = (int(x) for x in a.res.lower().split('x'))
     return a
@@ -636,13 +659,24 @@ def main():
     a = parse_args()
     bpy.ops.wm.read_factory_settings(use_empty=True)
     OBJ.clear(); ANIM.clear()
-    L = materials.chenab_library(materials.train_library(materials.library())); LIB['L'] = L
+    L = materials.chenab_library(materials.train_library(materials.library()), glow=(A + 30, Z_SPRING)); LIB['L'] = L
     build_world(L); setup_render(a); build_all(L); make_camera()
     sc = bpy.context.scene; sc.frame_start, sc.frame_end = 1, int(round(END * FPS))
     bpy.app.handlers.frame_change_pre.clear(); bpy.app.handlers.frame_change_pre.append(frame_handler)
     frames = frame_list(a.frames)
     if a.anchors:
         export_anchors(a.anchors, frames); return
+    if a.refcam:                                          # fixed side-on camera, level with the deck, from downstream
+        bpy.app.handlers.frame_change_pre.clear(); sc.frame_set(500); frame_handler(sc)
+        bpy.app.handlers.frame_change_pre.clear()
+        for o in OBJ['chev'] + OBJ['thrust']:
+            show(o, False)
+        sc.render.resolution_x, sc.render.resolution_y = 1000, 610
+        cam = sc.camera; cam.location = (40, -1500, 330); bpy.data.objects['CamTarget'].location = (40, 0, 250)
+        cam.data.lens = 61
+        for k in ('terrain', 'river', 'train'):
+            show(OBJ[k], False)
+        bpy.data.objects['Ground'].hide_render = True
     os.makedirs(a.out, exist_ok=True)
     sc.render.filepath = os.path.join(os.path.abspath(a.out), 'frame_')
     if '-' in a.frames and ',' not in a.frames:

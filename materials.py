@@ -225,7 +225,7 @@ def _value(nt, name, v=0.0):
     return n
 
 
-def rock(name='Rock'):
+def rock(name='Rock', gx=275.0, gz=225.0):
     """Gorge rock: two-tone noise + bump; orange 'carrying' glow masked to the two abutment zones.
     Node 'Glow' (value 0..1) is set per frame by scene.py."""
     m = _principled(name, '#8F7E68', rough=0.85)
@@ -234,9 +234,9 @@ def rock(name='Rock'):
     tc = nt.nodes.new('ShaderNodeTexCoord'); sep = nt.nodes.new('ShaderNodeSeparateXYZ')
     nt.links.new(tc.outputs['Object'], sep.inputs[0])
     ax = nt.nodes.new('ShaderNodeMath'); ax.operation = 'ABSOLUTE'; nt.links.new(sep.outputs['X'], ax.inputs[0])
-    dx = nt.nodes.new('ShaderNodeMath'); dx.operation = 'SUBTRACT'; dx.inputs[1].default_value = 275.0
+    dx = nt.nodes.new('ShaderNodeMath'); dx.operation = 'SUBTRACT'; dx.inputs[1].default_value = gx
     nt.links.new(ax.outputs[0], dx.inputs[0])
-    dz = nt.nodes.new('ShaderNodeMath'); dz.operation = 'SUBTRACT'; dz.inputs[1].default_value = 225.0
+    dz = nt.nodes.new('ShaderNodeMath'); dz.operation = 'SUBTRACT'; dz.inputs[1].default_value = gz
     nt.links.new(sep.outputs['Z'], dz.inputs[0])
     cb = nt.nodes.new('ShaderNodeCombineXYZ')
     nt.links.new(dx.outputs[0], cb.inputs[0]); nt.links.new(sep.outputs['Y'], cb.inputs[1]); nt.links.new(dz.outputs[0], cb.inputs[2])
@@ -313,8 +313,8 @@ def streak(name='WindStreak', color='#9CD3F2', axis='Y', period=0.025):
     return m
 
 
-def chenab_library(L):
-    L['rock'] = rock()
+def chenab_library(L, glow=(275.0, 225.0)):
+    L['rock'] = rock(gx=glow[0], gz=glow[1])
     L['hatchRock'] = hatch('CutHatchRock', scale=0.045)
     L['river'] = river()
     L['archSteel'] = _principled('ArchSteel', '#C9CFD5', rough=0.4, metal=0.35)
@@ -328,7 +328,8 @@ def chenab_library(L):
     L['arrow'] = emissive('ArrowOrange', '#E2673A', 1.4)
     L['arrowDash'] = streak('ArrowDash', '#E2673A', axis='Z', period=0.09)
     L['wind'] = streak('WindStreak', '#BFE4F7', axis='Y', period=0.02)
-    L['shock'] = fade_mix(xray('Shockwave', '#DDF1FB'))
+    L['shockRing'] = fade_mix(emissive('ShockRing', '#F4FBFF', 3.0))
+    L['dust'] = fade_mix(_principled('Dust', '#D9C6AF', rough=0.95))
     L['cloud'] = _principled('Cloud', '#F7F3EC', rough=0.9, **{'Subsurface Weight': 0.15})
     L['sunDisc'] = emissive('SunDisc', '#FFE2A8', 25.0)
     return L
